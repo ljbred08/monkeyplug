@@ -73,7 +73,8 @@ MUTAGEN_METADATA_TAGS = ['encodedby', 'comment']
 MUTAGEN_METADATA_TAG_VALUE = u'monkeyplug'
 SPEECH_REC_MODE_VOSK = "vosk"
 SPEECH_REC_MODE_WHISPER = "whisper"
-DEFAULT_SPEECH_REC_MODE = os.getenv("MONKEYPLUG_MODE", SPEECH_REC_MODE_WHISPER)
+SPEECH_REC_MODE_GROQ = "groq"
+DEFAULT_SPEECH_REC_MODE = os.getenv("MONKEYPLUG_MODE", SPEECH_REC_MODE_GROQ)
 DEFAULT_VOSK_MODEL_DIR = os.getenv(
     "VOSK_MODEL_DIR", os.path.join(os.path.join(os.path.join(os.path.expanduser("~"), '.cache'), 'vosk'))
 )
@@ -84,8 +85,15 @@ DEFAULT_WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "small.en")
 DEFAULT_TORCH_THREADS = 0
 
 ###################################################################################################
-script_name = os.path.basename(__file__)
-script_path = os.path.dirname(os.path.realpath(__file__))
+# Determine script_path and script_name in a way that works both as module and direct execution
+try:
+    # This works when running as a module
+    script_name = 'monkeyplug.py'
+    script_path = os.path.dirname(os.path.realpath(__file__))
+except (NameError, TypeError):
+    # Fallback for edge cases
+    script_name = 'monkeyplug.py'
+    script_path = os.path.dirname(os.path.realpath(sys.argv[0])) if sys.argv and sys.argv[0] else os.getcwd()
 
 
 # thanks https://docs.python.org/3/library/itertools.html#recipes
@@ -243,6 +251,10 @@ class Plugger(object):
     forceDespiteTag = False
     aParams = None
     tags = None
+    # for instrumental splicing
+    instrumentalFileSpec = ""
+    instrumentalMode = False
+    instrumentalSegments = []  # List of (start, end) tuples for profanity sections
 
     ######## init #################################################################
     def __init__(
@@ -270,6 +282,7 @@ class Plugger(object):
         beepDropTransition=BEEP_DROPOUT_TRANSITION_DEFAULT,
         force=False,
         dbug=False,
+        instrumentalFileSpec=None,
     ):
         self.padSecPre = padMsecPre / 1000.0
         self.padSecPost = padMsecPost / 1000.0
@@ -407,12 +420,33 @@ class Plugger(object):
             self._ensure_directory_exists(self.outputJson, "JSON output directory")
 
         # load the swears file (not actually mapping right now, but who knows, speech synthesis maybe someday?)
-        if (iSwearsFileSpec is not None) and os.path.isfile(iSwearsFileSpec):
-            self.swearsFileSpec = iSwearsFileSpec
-        else:
-            raise IOError(errno.ENOENT, os.strerror(errno.ENOENT), iSwearsFileSpec)
+        self.swearsFileSpec = iSwearsFileSpec if (iSwearsFileSpec is not None) and os.path.isfile(iSwearsFileSpec) else None
 
         self._load_swears_file()
+
+        # validate instrumental file if provided
+        if instrumentalFileSpec:
+            if not os.path.isfile(instrumentalFileSpec):
+                raise IOError(errno.ENOENT, os.strerror(errno.ENOENT), instrumentalFileSpec)
+
+            # Check duration of instrumental vs original
+            # Need to get duration directly from ffprobe since GetCodecs doesn't extract it
+            instrumentalDuration = self._get_file_duration(instrumentalFileSpec)
+            originalDuration = self._get_file_duration(self.inputFileSpec)
+
+            if instrumentalDuration > 0 and originalDuration > 0:
+                if instrumentalDuration < originalDuration:
+                    raise ValueError(
+                        f"Instrumental file duration ({instrumentalDuration}s) is shorter than "
+                        f"original file duration ({originalDuration}s)"
+                    )
+            elif self.debug:
+                mmguero.eprint('Warning: Could not verify file durations')
+
+            self.instrumentalFileSpec = instrumentalFileSpec
+            self.instrumentalMode = True
+        else:
+            self.instrumentalMode = False
 
         if self.debug:
             mmguero.eprint(f'Input: {self.inputFileSpec}')
@@ -420,7 +454,7 @@ class Plugger(object):
             mmguero.eprint(f'Output: {self.outputFileSpec}')
             mmguero.eprint(f'Output audio format: {self.outputAudioFileFormat}')
             mmguero.eprint(f'Encode parameters: {self.aParams}')
-            mmguero.eprint(f'Profanity file: {self.swearsFileSpec}')
+            mmguero.eprint(f'Profanity file: {self.swearsFileSpec if self.swearsFileSpec else "built-in"}')
             mmguero.eprint(f'Intermediate downloaded file: {self.tmpDownloadedFileSpec}')
             if self.outputJson:
                 mmguero.eprint(f'Transcript output: {self.outputJson}')
@@ -434,6 +468,9 @@ class Plugger(object):
                 mmguero.eprint(f'Beep sine weight: {self.beepSineWeight}')
                 mmguero.eprint(f'Beep dropout transition: {self.beepDropTransition}')
             mmguero.eprint(f'Force despite tags: {self.forceDespiteTag}')
+            mmguero.eprint(f'Instrumental mode: {self.instrumentalMode}')
+            if self.instrumentalMode:
+                mmguero.eprint(f'Instrumental file: {self.instrumentalFileSpec}')
 
     ######## del ##################################################################
     def __del__(self):
@@ -450,6 +487,32 @@ class Plugger(object):
                 mmguero.eprint(f'Creating {description}: {directory}')
             os.makedirs(directory, exist_ok=True)
         return directory
+
+    ######## _get_file_duration ###################################################
+    def _get_file_duration(self, filepath):
+        """Get the duration of an audio/video file using ffprobe"""
+        try:
+            ffprobeCmd = [
+                'ffprobe',
+                '-v',
+                'quiet',
+                '-print_format',
+                'json',
+                '-show_entries',
+                'format=duration',
+                filepath,
+            ]
+            ffprobeResult, ffprobeOutput = mmguero.run_process(ffprobeCmd, stdout=True, stderr=False, debug=False)
+            if ffprobeResult == 0:
+                ffprobeData = mmguero.load_str_if_json(' '.join(ffprobeOutput))
+                duration_str = mmguero.deep_get(ffprobeData, ['format', 'duration'], '0')
+                return float(duration_str)
+            else:
+                return 0.0
+        except Exception as e:
+            if self.debug:
+                mmguero.eprint(f'Error getting duration for {filepath}: {e}')
+            return 0.0
 
     ######## LoadTranscriptFromFile ##############################################
     def LoadTranscriptFromFile(self):
@@ -479,28 +542,93 @@ class Plugger(object):
       
     ######## _load_swears_file ####################################################
     def _load_swears_file(self):
-        """Load swears from text or JSON format"""
-        # Try to detect and parse JSON first
-        is_json = False
-        if self.swearsFileSpec.lower().endswith('.json'):
-            is_json = True
+        """Load swears from built-in list first, then from custom text or JSON file if provided"""
+        # Load built-in profanity list first
+        self._load_builtin_swears()
+
+        # Load custom swears file if provided
+        if self.swearsFileSpec:
+            # Try to detect and parse JSON first
+            is_json = False
+            if self.swearsFileSpec.lower().endswith('.json'):
+                is_json = True
+            else:
+                # Try to parse as JSON even without .json extension
+                try:
+                    with open(self.swearsFileSpec, 'r') as f:
+                        content = f.read()
+                        json.loads(content)
+                        is_json = True
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+            if is_json:
+                self._load_swears_from_json()
+            else:
+                self._load_swears_from_text()
+
+            if self.debug:
+                mmguero.eprint(f'Loaded {len(self.swearsMap)} profanity entries (built-in + custom from {self.swearsFileSpec})')
         else:
-            # Try to parse as JSON even without .json extension
+            if self.debug:
+                mmguero.eprint(f'Loaded {len(self.swearsMap)} profanity entries from built-in list')
+
+    def _load_builtin_swears(self):
+        """Load built-in profanity list from package data"""
+        data = None
+        error_msgs = []
+
+        # Method 1: Try importlib.resources.files (Python 3.9+)
+        try:
+            import importlib.resources as resources
+            with resources.files('monkeyplug.data').joinpath('profanity_list.json').open('r') as f:
+                data = json.load(f)
+            if self.debug:
+                mmguero.eprint('Loaded profanity list using importlib.resources.files')
+        except Exception as e:
+            error_msgs.append(f"importlib.resources.files failed: {e}")
+
+        # Method 2: Fallback for older Python versions using pkg_resources
+        if data is None:
             try:
-                with open(self.swearsFileSpec, 'r') as f:
-                    content = f.read()
-                    json.loads(content)
-                    is_json = True
-            except (json.JSONDecodeError, ValueError):
-                pass
+                import pkg_resources
+                resource_package = 'monkeyplug'
+                resource_path = '/'.join(('data', 'profanity_list.json'))
+                data = json.loads(pkg_resources.resource_string(resource_package, resource_path).decode('UTF-8'))
+                if self.debug:
+                    mmguero.eprint('Loaded profanity list using pkg_resources')
+            except Exception as e:
+                error_msgs.append(f"pkg_resources failed: {e}")
 
-        if is_json:
-            self._load_swears_from_json()
-        else:
-            self._load_swears_from_text()
+        # Method 3: Last resort - try to find the file relative to this module
+        if data is None:
+            try:
+                module_dir = os.path.dirname(os.path.abspath(__file__))
+                data_file = os.path.join(module_dir, 'data', 'profanity_list.json')
+                if os.path.exists(data_file):
+                    with open(data_file, 'r') as f:
+                        data = json.load(f)
+                    if self.debug:
+                        mmguero.eprint(f'Loaded profanity list from file path: {data_file}')
+                else:
+                    error_msgs.append(f"File not found at {data_file}")
+            except Exception as e:
+                error_msgs.append(f"File path fallback failed: {e}")
 
-        if self.debug:
-            mmguero.eprint(f'Loaded {len(self.swearsMap)} profanity entries from {self.swearsFileSpec}')
+        # If all methods failed, warn but continue (custom swears file might be provided)
+        if data is None:
+            if self.debug:
+                mmguero.eprint('Could not load built-in profanity list:')
+                for msg in error_msgs:
+                    mmguero.eprint(f'  {msg}')
+            return
+
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, str) and item.strip():
+                    self.swearsMap[scrubword(item)] = "*****"
+        elif self.debug:
+            mmguero.eprint('Built-in profanity list has unexpected format')
 
     def _load_swears_from_json(self):
         """Load swears from JSON format - simple array of strings
@@ -534,6 +662,53 @@ class Plugger(object):
             self.RecognizeSpeech()
 
         self.naughtyWordList = [word for word in self.wordList if word["scrub"] is True]
+
+        # Handle instrumental mode or traditional mute/beep mode
+        if self.instrumentalMode:
+            return self._create_instrumental_splice_list()
+        else:
+            return self._create_mute_beep_list()
+
+    def _create_instrumental_splice_list(self):
+        """Create list of profanity segments for instrumental splicing"""
+        if len(self.naughtyWordList) == 0:
+            self.instrumentalSegments = []
+            return []
+
+        # Sort by start time
+        sorted_naughty = sorted(self.naughtyWordList, key=lambda x: x['start'])
+
+        # Merge consecutive profanity segments (gap < 100ms)
+        merged_segments = []
+        if sorted_naughty:
+            current_start = max(0, sorted_naughty[0]['start'] - self.padSecPre)
+            current_end = sorted_naughty[0]['end'] + self.padSecPost
+
+            for word in sorted_naughty[1:]:
+                word_start = max(0, word['start'] - self.padSecPre)
+                word_end = word['end'] + self.padSecPost
+
+                # If gap between segments is less than 100ms, merge them
+                if word_start - current_end < 0.1:
+                    current_end = max(current_end, word_end)
+                else:
+                    merged_segments.append((current_start, current_end))
+                    current_start = word_start
+                    current_end = word_end
+
+            # Add the last segment
+            merged_segments.append((current_start, current_end))
+
+        self.instrumentalSegments = merged_segments
+
+        if self.debug:
+            mmguero.eprint(f'Instrumental segments: {self.instrumentalSegments}')
+
+        # Return empty list for muteTimeList (not used in instrumental mode)
+        return []
+
+    def _create_mute_beep_list(self):
+        """Create traditional mute or beep filter list"""
         if len(self.naughtyWordList) > 0:
             # append a dummy word at the very end so that pairwise can peek then ignore it
             self.naughtyWordList.extend(
@@ -580,25 +755,83 @@ class Plugger(object):
 
         return self.muteTimeList
 
+    def _build_instrumental_filters(self):
+        """Build FFmpeg filter complex for instrumental splicing"""
+        if not self.instrumentalSegments:
+            return []
+
+        # Build filter complex - alternate between original [0:a] and instrumental [1:a]
+        filter_parts = []
+
+        seg_index = 0
+        last_end = 0.0
+
+        # Process each profanity segment
+        for start, end in self.instrumentalSegments:
+            # Add original audio segment before profanity (from input 0)
+            if start > last_end:
+                filter_parts.append(
+                    f"[0:a]atrim={last_end:.2f}:{start:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
+                )
+                seg_index += 1
+
+            # Add instrumental audio segment for profanity (from input 1)
+            filter_parts.append(
+                f"[1:a]atrim={start:.2f}:{end:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
+            )
+            seg_index += 1
+
+            last_end = end
+
+        # Add final original audio segment after last profanity (from input 0)
+        # No end timestamp needed - goes to end of file
+        filter_parts.append(
+            f"[0:a]atrim={last_end:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
+        )
+        seg_index += 1
+
+        # Concatenate all segments
+        concat_input = ''.join([f'[seg{i}]' for i in range(seg_index)])
+        filter_parts.append(
+            f"{concat_input}concat=n={seg_index}:v=0:a=1[outa]"
+        )
+
+        filter_complex = ';'.join(filter_parts)
+
+        if self.debug:
+            if hasattr(self, 'verbose_level') and self.verbose_level == "full":
+                mmguero.eprint(f'Filter complex: {filter_complex}')
+            else:
+                # Concise mode: just show segment count
+                mmguero.eprint(f'Building FFmpeg filter with {len(self.instrumentalSegments)} instrumental segment(s)')
+
+        return ['-filter_complex', filter_complex, '-map', '[outa]']
+
     ######## EncodeCleanAudio ####################################################
     def EncodeCleanAudio(self):
         if (self.forceDespiteTag is True) or (GetMonkeyplugTagged(self.inputFileSpec, debug=self.debug) is False):
             self.CreateCleanMuteList()
 
-            if len(self.muteTimeList) > 0:
-                if self.beep:
-                    muteTimeListStr = ','.join(self.muteTimeList)
-                    sineTimeListStr = ';'.join([f'{val}[beep{i+1}]' for i, val in enumerate(self.sineTimeList)])
-                    beepDelayList = ';'.join(
-                        [f'[beep{i+1}]{val}[beep{i+1}_delayed]' for i, val in enumerate(self.beepDelayList)]
-                    )
-                    beepMixList = ''.join([f'[beep{i+1}_delayed]' for i in range(len(self.beepDelayList))])
-                    filterStr = f"[0:a]{muteTimeListStr}[mute];{sineTimeListStr};{beepDelayList};[mute]{beepMixList}amix=inputs={len(self.beepDelayList)+1}:normalize={str(self.beepMixNormalize).lower()}:dropout_transition={self.beepDropTransition}:weights={self.beepAudioWeight} {' '.join([str(self.beepSineWeight)] * len(self.beepDelayList))}"
-                    audioArgs = ['-filter_complex', filterStr]
-                else:
-                    audioArgs = ['-af', ",".join(self.muteTimeList)]
+            # Handle instrumental mode differently
+            if self.instrumentalMode:
+                # Use instrumental splicing
+                audioArgs = self._build_instrumental_filters()
             else:
-                audioArgs = []
+                # Traditional mute or beep
+                if len(self.muteTimeList) > 0:
+                    if self.beep:
+                        muteTimeListStr = ','.join(self.muteTimeList)
+                        sineTimeListStr = ';'.join([f'{val}[beep{i+1}]' for i, val in enumerate(self.sineTimeList)])
+                        beepDelayList = ';'.join(
+                            [f'[beep{i+1}]{val}[beep{i+1}_delayed]' for i, val in enumerate(self.beepDelayList)]
+                        )
+                        beepMixList = ''.join([f'[beep{i+1}_delayed]' for i in range(len(self.beepDelayList))])
+                        filterStr = f"[0:a]{muteTimeListStr}[mute];{sineTimeListStr};{beepDelayList};[mute]{beepMixList}amix=inputs={len(self.beepDelayList)+1}:normalize={str(self.beepMixNormalize).lower()}:dropout_transition={self.beepDropTransition}:weights={self.beepAudioWeight} {' '.join([str(self.beepSineWeight)] * len(self.beepDelayList))}"
+                        audioArgs = ['-filter_complex', filterStr]
+                    else:
+                        audioArgs = ['-af', ",".join(self.muteTimeList)]
+                else:
+                    audioArgs = []
 
             if self.outputVideoFileFormat:
                 # replace existing audio stream in video file with -copy
@@ -612,14 +845,21 @@ class Plugger(object):
                     '-y',
                     '-i',
                     self.inputFileSpec,
+                ]
+
+                # Add instrumental file input if in instrumental mode
+                if self.instrumentalMode:
+                    ffmpegCmd.extend(['-i', self.instrumentalFileSpec])
+
+                ffmpegCmd.extend([
                     '-c:v',
                     'copy',
                     '-sn',
                     '-dn',
-                    audioArgs,
-                    self.aParams,
-                    self.outputFileSpec,
-                ]
+                ])
+                ffmpegCmd.extend(audioArgs)
+                ffmpegCmd.extend(self.aParams)
+                ffmpegCmd.append(self.outputFileSpec)
 
             else:
                 ffmpegCmd = [
@@ -632,13 +872,17 @@ class Plugger(object):
                     '-y',
                     '-i',
                     self.inputFileSpec,
-                    '-vn',
-                    '-sn',
-                    '-dn',
-                    audioArgs,
-                    self.aParams,
-                    self.outputFileSpec,
                 ]
+
+                # Add instrumental file input if in instrumental mode
+                if self.instrumentalMode:
+                    ffmpegCmd.extend(['-i', self.instrumentalFileSpec])
+
+                ffmpegCmd.extend(['-vn', '-sn', '-dn'])
+                ffmpegCmd.extend(audioArgs)
+                ffmpegCmd.extend(self.aParams)
+                ffmpegCmd.append(self.outputFileSpec)
+
             ffmpegResult, ffmpegOutput = mmguero.run_process(ffmpegCmd, stdout=True, stderr=True, debug=self.debug)
             if (ffmpegResult != 0) or (not os.path.isfile(self.outputFileSpec)):
                 mmguero.eprint(' '.join(mmguero.flatten(ffmpegCmd)))
@@ -821,7 +1065,12 @@ class VoskPlugger(Plugger):
                 )
 
             if self.debug:
-                mmguero.eprint(json.dumps(self.wordList))
+                if hasattr(self, 'verbose_level') and self.verbose_level == "full":
+                    mmguero.eprint(json.dumps(self.wordList))
+                else:
+                    # Concise mode: just show summary
+                    profanity_count = sum(1 for word in self.wordList if word.get('scrub', False))
+                    mmguero.eprint(f'Transcribed {len(self.wordList)} words, {profanity_count} profanity instances detected')
 
             if self.outputJson:
                 with open(self.outputJson, "w") as f:
@@ -938,7 +1187,12 @@ class WhisperPlugger(Plugger):
                         self.wordList.append(word)
 
         if self.debug:
-            mmguero.eprint(json.dumps(self.wordList))
+            if hasattr(self, 'verbose_level') and self.verbose_level == "full":
+                mmguero.eprint(json.dumps(self.wordList))
+            else:
+                # Concise mode: just show summary
+                profanity_count = sum(1 for word in self.wordList if word.get('scrub', False))
+                mmguero.eprint(f'Transcribed {len(self.wordList)} words, {profanity_count} profanity instances detected')
 
         if self.outputJson:
             with open(self.outputJson, "w") as f:
@@ -948,6 +1202,472 @@ class WhisperPlugger(Plugger):
 
 
 #################################################################################
+class GroqPlugger(Plugger):
+    GROQ_API_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions"
+    debug = False
+    api_key = None
+    groq_model = "whisper-large-v3"
+    transcript = None
+    VOCAL_DETECTION_SAMPLE_DURATION = 10  # Seconds to sample for vocal detection
+    # Filler words that indicate silence (including common hallucinations)
+    VOCAL_DETECTION_FILLER_WORDS = {
+        'thank', 'thanks', 'please', 'you', 'hey', 'yeah', 'oh', 'wow',
+        '¶', '¶¶',  # Common hallucinations/artifacts
+        '',  # Empty strings
+    }  # Filler words that indicate silence
+
+    def __init__(
+        self,
+        iFileSpec,
+        oFileSpec,
+        oAudioFileFormat,
+        iSwearsFileSpec,
+        groq_api_key,
+        groq_model,
+        outputJson,
+        inputTranscript=None,
+        saveTranscript=False,
+        forceRetranscribe=False,
+        aParams=None,
+        aChannels=AUDIO_DEFAULT_CHANNELS,
+        aSampleRate=AUDIO_DEFAULT_SAMPLE_RATE,
+        aBitRate=AUDIO_DEFAULT_BIT_RATE,
+        aVorbisQscale=AUDIO_DEFAULT_VORBIS_QSCALE,
+        padMsecPre=0,
+        padMsecPost=0,
+        beep=False,
+        beepHertz=BEEP_HERTZ_DEFAULT,
+        beepMixNormalize=BEEP_MIX_NORMALIZE_DEFAULT,
+        beepAudioWeight=BEEP_AUDIO_WEIGHT_DEFAULT,
+        beepSineWeight=BEEP_SINE_WEIGHT_DEFAULT,
+        beepDropTransition=BEEP_DROPOUT_TRANSITION_DEFAULT,
+        force=False,
+        dbug=False,
+        instrumentalFileSpec=None,
+        verbose_level="",
+    ):
+        # Import groq_config - handle both relative and absolute imports
+        try:
+            from .groq_config import load_groq_api_key
+        except ImportError:
+            from monkeyplug.groq_config import load_groq_api_key
+
+        self.api_key = load_groq_api_key(groq_api_key, debug=dbug)
+        if not self.api_key:
+            raise ValueError(
+                "Groq API key not found. Please provide it via --groq-api-key parameter, "
+                "GROQ_API_KEY environment variable, ~/.groq/config.json file, or ./.groq_key file"
+            )
+
+        self.groq_model = groq_model
+        self.debug = dbug
+        self.verbose_level = verbose_level
+
+        super().__init__(
+            iFileSpec=iFileSpec,
+            oFileSpec=oFileSpec,
+            oAudioFileFormat=oAudioFileFormat,
+            iSwearsFileSpec=iSwearsFileSpec,
+            outputJson=outputJson,
+            inputTranscript=inputTranscript,
+            saveTranscript=saveTranscript,
+            forceRetranscribe=forceRetranscribe,
+            aParams=aParams,
+            aChannels=aChannels,
+            aSampleRate=aSampleRate,
+            aBitRate=aBitRate,
+            aVorbisQscale=aVorbisQscale,
+            padMsecPre=padMsecPre,
+            padMsecPost=padMsecPost,
+            beep=beep,
+            beepHertz=beepHertz,
+            beepMixNormalize=beepMixNormalize,
+            beepAudioWeight=beepAudioWeight,
+            beepSineWeight=beepSineWeight,
+            beepDropTransition=beepDropTransition,
+            force=force,
+            dbug=dbug,
+            instrumentalFileSpec=instrumentalFileSpec,
+        )
+
+        if self.debug:
+            if inputTranscript:
+                mmguero.eprint('Using input transcript (skipping speech recognition)')
+            else:
+                mmguero.eprint(f'Using Groq API with model: {self.groq_model}')
+
+    def RecognizeSpeech(self):
+        import requests
+        import time
+
+        self.wordList.clear()
+
+        # Prepare the API request
+        headers = {
+            "Authorization": f"Bearer {self.api_key}"
+        }
+
+        data = {
+            "model": self.groq_model,
+            "response_format": "verbose_json",
+            "timestamp_granularities[]": "word"
+        }
+
+        # Implement retry logic for rate limiting
+        max_retries = 3
+        retry_delay = 1  # Initial delay in seconds
+
+        for attempt in range(max_retries):
+            file_handle = None
+            try:
+                # Prepare the file and data - open fresh for each attempt
+                filename = os.path.basename(self.inputFileSpec)
+                file_handle = open(self.inputFileSpec, 'rb')
+                files = {
+                    "file": (filename, file_handle, "audio/mpeg")
+                }
+
+                if self.debug:
+                    mmguero.eprint(f"Sending request to Groq API (attempt {attempt + 1}/{max_retries})...")
+
+                response = requests.post(
+                    self.GROQ_API_ENDPOINT,
+                    headers=headers,
+                    files=files,
+                    data=data,
+                    timeout=120  # 2 minute timeout
+                )
+
+                # Handle rate limiting (HTTP 429)
+                if response.status_code == 429:
+                    if attempt < max_retries - 1:
+                        if self.debug:
+                            mmguero.eprint(f"Rate limit hit, retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                        continue
+                    else:
+                        raise Exception("Rate limit exceeded. Please try again later.")
+
+                # Handle authentication errors (HTTP 401)
+                if response.status_code == 401:
+                    raise Exception(
+                        "Invalid Groq API key. Please check your API key configuration."
+                    )
+
+                # Raise for other HTTP errors
+                response.raise_for_status()
+
+                # Parse the response
+                self.transcript = response.json()
+
+                if self.transcript and 'words' in self.transcript:
+                    for word in self.transcript['words']:
+                        word['word'] = word['word'].strip()
+                        word['scrub'] = scrubword(word['word']) in self.swearsMap
+                        self.wordList.append(word)
+
+                if self.debug:
+                    if hasattr(self, 'verbose_level') and self.verbose_level == "full":
+                        mmguero.eprint(json.dumps(self.wordList))
+                    else:
+                        # Concise mode: just show summary
+                        profanity_count = sum(1 for word in self.wordList if word.get('scrub', False))
+                        mmguero.eprint(f'Transcribed {len(self.wordList)} words, {profanity_count} profanity instances detected')
+
+                if self.outputJson:
+                    with open(self.outputJson, "w") as f:
+                        f.write(json.dumps(self.wordList))
+
+                return self.wordList
+
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    if self.debug:
+                        mmguero.eprint(f"Request timed out, retrying (attempt {attempt + 1}/{max_retries})...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    raise Exception("Request timed out. Please check your internet connection and try again.")
+
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    if self.debug:
+                        mmguero.eprint(f"Request failed: {e}, retrying (attempt {attempt + 1}/{max_retries})...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    raise Exception(f"Failed to connect to Groq API: {e}")
+
+            finally:
+                # Make sure the file is closed after each attempt
+                if file_handle is not None:
+                    file_handle.close()
+
+        raise Exception("Failed to complete speech recognition after maximum retries")
+
+    def DetectVocals(self, filepath):
+        """Detect if file has vocals by transcribing a short sample from the middle.
+
+        Args:
+            filepath: Path to audio file to check
+
+        Returns:
+            bool: True if vocals detected, False if instrumental (no speech)
+        """
+        import requests
+        import tempfile
+
+        # Get file duration
+        duration = self._get_file_duration(filepath)
+        if duration < self.VOCAL_DETECTION_SAMPLE_DURATION:
+            # Short files, assume vocal (too short to be instrumental)
+            return True
+
+        # Calculate middle position for sample
+        start_time = (duration - self.VOCAL_DETECTION_SAMPLE_DURATION) / 2
+
+        # Create temporary file for sample
+        with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp:
+            tmp_path = tmp.name
+
+        try:
+            # Extract sample from middle using ffmpeg
+            ffmpegCmd = [
+                'ffmpeg', '-nostdin', '-hide_banner', '-nostats', '-loglevel', 'error',
+                '-i', filepath,
+                '-ss', str(start_time),
+                '-t', str(self.VOCAL_DETECTION_SAMPLE_DURATION),
+                '-acodec', 'libmp3lame', '-b:a', '128K',
+                '-y', tmp_path
+            ]
+
+            result, _ = mmguero.run_process(ffmpegCmd, stdout=False, stderr=False, debug=False)
+
+            if result != 0:
+                # On error, assume vocal
+                if self.debug:
+                    mmguero.eprint(f'Warning: Failed to extract sample from {os.path.basename(filepath)}, assuming vocals')
+                return True
+
+            # Transcribe sample with Groq API
+            file_handle = None
+            try:
+                file_handle = open(tmp_path, 'rb')
+                files = {"file": (os.path.basename(filepath), file_handle, "audio/mpeg")}
+                data = {
+                    "model": self.groq_model,
+                    "response_format": "verbose_json",
+                    "timestamp_granularities[]": "word"
+                }
+
+                headers = {"Authorization": f"Bearer {self.api_key}"}
+                response = requests.post(
+                    self.GROQ_API_ENDPOINT,
+                    headers=headers,
+                    files=files,
+                    data=data,
+                    timeout=30
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+                    # Check if any words were detected
+                    words = result.get('words', [])
+
+                    if len(words) == 0:
+                        # No words detected = instrumental
+                        if self.debug:
+                            mmguero.eprint(f'Vocal detection: 0 words detected → instrumental')
+                        return False
+
+                    # Get all detected words for debugging
+                    # Clean words: lowercase, strip punctuation and special characters
+                    def clean_word(w):
+                        # Remove common punctuation and special Unicode characters
+                        cleaned = w.lower().strip('.,!?;:"\'()[]{}©®™¶§†‡•—–')
+                        return cleaned
+
+                    detected_words = {clean_word(word['word']) for word in words}
+                    all_words_text = ', '.join([word['word'] for word in words])
+
+                    # Check for "thank you" pattern - if only filler words detected, it's silence/instrumental
+                    # If ALL detected words are filler words, treat as instrumental
+                    if detected_words.issubset(self.VOCAL_DETECTION_FILLER_WORDS):
+                        if self.debug:
+                            mmguero.eprint(f'Vocal detection: Only filler words detected ({all_words_text}) → instrumental (silence)')
+                        return False
+
+                    # Real lyrics detected = vocal track
+                    if self.debug:
+                        mmguero.eprint(f'Vocal detection: {len(words)} words detected → vocals')
+                        mmguero.eprint(f'  Words: {all_words_text}')
+
+                    return True
+
+                # On error, assume vocal
+                if self.debug:
+                    mmguero.eprint(f'Warning: API error during vocal detection, assuming vocals')
+                return True
+
+            finally:
+                if file_handle:
+                    file_handle.close()
+
+        except Exception as e:
+            # On any error, assume vocal
+            if self.debug:
+                mmguero.eprint(f'Warning: Exception during vocal detection: {e}, assuming vocals')
+            return True
+
+        finally:
+            # Clean up temporary file
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+
+#################################################################################
+
+
+###################################################################################################
+# Wildcard and batch processing helpers
+def apply_output_pattern(input_file, output_pattern):
+    """Generate output filename from pattern.
+
+    Args:
+        input_file: Path to input file
+        output_pattern: Output pattern (e.g., '*_clean.mp3')
+
+    Returns:
+        str: Generated output filepath
+    """
+    input_dir = os.path.dirname(input_file)
+    input_basename = os.path.basename(input_file)
+    input_name, input_ext = os.path.splitext(input_basename)
+
+    # Replace * with input name
+    output_name = output_pattern.replace('*', input_name)
+
+    # Add extension if not present in pattern
+    if not os.path.splitext(output_name)[1]:
+        output_name += input_ext
+
+    if input_dir:
+        return os.path.join(input_dir, output_name)
+    return output_name
+
+
+def expand_and_detect_vocals(input_pattern, output_pattern, args):
+    """Expand wildcards and detect which files have vocals.
+
+    Args:
+        input_pattern: Input file pattern (e.g., '*.mp3')
+        output_pattern: Output file pattern (e.g., '*_clean.mp3')
+        args: Parsed command-line arguments
+
+    Returns:
+        tuple: (vocal_files, instrumental_files, output_files)
+    """
+    import glob
+    import re
+
+    # Expand input wildcard
+    input_files = glob.glob(input_pattern)
+
+    if not input_files:
+        raise IOError(f"No files found matching pattern: {input_pattern}")
+
+    # If only one file and no wildcard, return it directly
+    if len(input_files) == 1 and '*' not in input_pattern:
+        output_file = apply_output_pattern(input_files[0], output_pattern)
+        return [input_files[0]], [], [output_file]
+
+    # Filter out files that match the output pattern (already processed)
+    # Convert output pattern to regex for matching
+    def pattern_to_regex(pattern):
+        """Convert wildcard pattern to regex for matching"""
+        # Escape special regex characters except *
+        regex = re.escape(pattern)
+        # Replace escaped * with .* (match anything)
+        regex = regex.replace(r'\*', '.*')
+        # Add anchors to match entire filename
+        return f'^{regex}$'
+
+    output_regex = pattern_to_regex(output_pattern)
+    filtered_files = []
+    skipped_output_files = []
+
+    for filepath in input_files:
+        basename = os.path.basename(filepath)
+        # Check if file matches output pattern
+        if re.match(output_regex, basename, re.IGNORECASE):
+            skipped_output_files.append(filepath)
+            if args.debug:
+                mmguero.eprint(f'Skipping output file: {basename} (matches output pattern)')
+        else:
+            filtered_files.append(filepath)
+
+    input_files = filtered_files
+
+    if not input_files:
+        mmguero.eprint('No files to process after filtering out already-processed output files.')
+        return [], [], []
+
+    if args.debug:
+        mmguero.eprint(f'Expanded wildcard to {len(input_files)} file(s) (skipped {len(skipped_output_files)} output files)')
+
+    # Create a GroqPlugger instance just for detection
+    # We need to use dummy values for most parameters since we're only detecting vocals
+    try:
+        from .groq_config import load_groq_api_key
+    except ImportError:
+        from monkeyplug.groq_config import load_groq_api_key
+
+    api_key = load_groq_api_key(args.groqApiKey, debug=args.debug)
+    if not api_key:
+        raise ValueError("Groq API key required for wildcard vocal detection")
+
+    # Create minimal GroqPlugger for detection
+    detector = GroqPlugger(
+        iFileSpec=input_files[0],  # Dummy, will be overridden
+        oFileSpec="dummy.mp3",
+        oAudioFileFormat="MATCH",
+        iSwearsFileSpec=args.swears,
+        groq_api_key=api_key,
+        groq_model=args.groqModel,
+        outputJson=None,
+        dbug=args.debug,
+        verbose_level=args.verbose_level if hasattr(args, 'verbose_level') else "",
+    )
+
+    vocal_files = []
+    instrumental_files = []
+    output_files = []
+
+    # Detect vocals in each file
+    for filepath in input_files:
+        basename = os.path.basename(filepath)
+
+        if args.debug:
+            mmguero.eprint(f'Detecting vocals in: {basename}')
+
+        has_vocals = detector.DetectVocals(filepath)
+
+        if has_vocals:
+            output_file = apply_output_pattern(filepath, output_pattern)
+            vocal_files.append(filepath)
+            output_files.append(output_file)
+            if args.debug:
+                mmguero.eprint(f'  ✓ Vocals detected → will process')
+        else:
+            instrumental_files.append(filepath)
+            if args.debug:
+                mmguero.eprint(f'  ✗ No vocals → skipping (likely instrumental)')
+
+    if args.debug:
+        mmguero.eprint(f'\nVocal detection complete: {len(vocal_files)} vocal, {len(instrumental_files)} instrumental, {len(skipped_output_files)} already processed')
+
+    return vocal_files, instrumental_files, output_files
 
 
 ###################################################################################################
@@ -969,13 +1689,13 @@ def RunMonkeyPlug():
     parser.add_argument(
         "-v",
         "--verbose",
-        dest="debug",
-        type=mmguero.str2bool,
+        dest="verbose",
+        type=str,
         nargs="?",
-        const=True,
-        default=False,
-        metavar="true|false",
-        help="Verbose/debug output",
+        const="concise",
+        default="",
+        metavar="[concise|full]",
+        help="Verbose output level: -v for concise, -v full for detailed debug output",
     )
     parser.add_argument(
         "-m",
@@ -984,7 +1704,7 @@ def RunMonkeyPlug():
         metavar="<string>",
         type=str,
         default=DEFAULT_SPEECH_REC_MODE,
-        help=f"Speech recognition engine ({SPEECH_REC_MODE_WHISPER}|{SPEECH_REC_MODE_VOSK}) (default: {DEFAULT_SPEECH_REC_MODE})",
+        help=f"Speech recognition engine ({SPEECH_REC_MODE_GROQ}|{SPEECH_REC_MODE_WHISPER}|{SPEECH_REC_MODE_VOSK}) (default: {DEFAULT_SPEECH_REC_MODE})",
     )
     parser.add_argument(
         "-i",
@@ -1046,6 +1766,33 @@ def RunMonkeyPlug():
         help="Force new transcription even if transcript file exists (overrides automatic reuse)",
     )
     parser.add_argument(
+        "--instrumental",
+        dest="instrumentalFile",
+        type=str,
+        default=None,
+        required=False,
+        metavar="<string>",
+        help="Instrumental version of the audio file for splicing profanity sections",
+    )
+    parser.add_argument(
+        "--instrumental-prefix",
+        dest="instrumentalPrefix",
+        type=str,
+        default="AUTO",
+        required=False,
+        metavar="<string>",
+        help="Prefix/suffix to search for instrumental file, 'AUTO' for fuzzy matching (default), or 'NONE' to disable instrumental mode and use mute/beep instead",
+    )
+    parser.add_argument(
+        "--instrumental-auto-candidates",
+        dest="instrumentalAutoCandidates",
+        type=int,
+        default=5,
+        required=False,
+        metavar="<int>",
+        help="Number of top candidates to validate in AUTO mode (default: 5)",
+    )
+    parser.add_argument(
         "-a",
         "--audio-params",
         help="Audio parameters for ffmpeg (default depends on output audio codec)",
@@ -1103,24 +1850,24 @@ def RunMonkeyPlug():
         dest="padMsec",
         metavar="<int>",
         type=int,
-        default=0,
-        help="Milliseconds to pad on either side of muted segments (default: 0)",
+        default=80,
+        help="Milliseconds to pad on either side of muted segments (default: 80)",
     )
     parser.add_argument(
         "--pad-milliseconds-pre",
         dest="padMsecPre",
         metavar="<int>",
         type=int,
-        default=0,
-        help="Milliseconds to pad before muted segments (default: 0)",
+        default=80,
+        help="Milliseconds to pad before muted segments (default: 80)",
     )
     parser.add_argument(
         "--pad-milliseconds-post",
         dest="padMsecPost",
         metavar="<int>",
         type=int,
-        default=0,
-        help="Milliseconds to pad after muted segments (default: 0)",
+        default=80,
+        help="Milliseconds to pad after muted segments (default: 80)",
     )
     parser.add_argument(
         "-b",
@@ -1232,6 +1979,24 @@ def RunMonkeyPlug():
         help=f"Number of threads used by torch for CPU inference ({DEFAULT_TORCH_THREADS})",
     )
 
+    groqArgGroup = parser.add_argument_group('Groq Options')
+    groqArgGroup.add_argument(
+        "--groq-api-key",
+        dest="groqApiKey",
+        metavar="<string>",
+        type=str,
+        default=None,
+        help="Groq API key (default: GROQ_API_KEY env var, ~/.groq/config.json, or ./.groq_key)",
+    )
+    groqArgGroup.add_argument(
+        "--groq-model",
+        dest="groqModel",
+        metavar="<string>",
+        type=str,
+        default="whisper-large-v3",
+        help="Groq Whisper model (default: whisper-large-v3)",
+    )
+
     try:
         parser.error = parser.exit
         args = parser.parse_args()
@@ -1239,12 +2004,321 @@ def RunMonkeyPlug():
         mmguero.eprint(se)
         exit(2)
 
+    # Set debug flag based on verbose level for backward compatibility
+    if args.verbose == "full":
+        args.debug = True
+        args.verbose_level = "full"
+    elif args.verbose == "concise":
+        args.debug = True
+        args.verbose_level = "concise"
+    else:
+        args.debug = False
+        args.verbose_level = ""
+
     if args.debug:
         mmguero.eprint(os.path.join(script_path, script_name))
         mmguero.eprint(f"Arguments: {sys.argv[1:]}")
-        mmguero.eprint(f"Arguments: {args}")
+        if args.verbose_level == "full":
+            mmguero.eprint(f"Arguments: {args}")
     else:
         sys.tracebacklimit = 0
+
+    # Check if wildcards are present in input or output
+    has_wildcards = '*' in args.input or '*' in args.output
+
+    # If beep mode is enabled, disable instrumental mode (beep takes precedence)
+    if args.beep:
+        if args.debug:
+            mmguero.eprint('Beep mode enabled - disabling instrumental mode')
+        args.instrumentalPrefix = None
+        args.instrumentalFile = None
+
+    # If instrumentalPrefix is explicitly set to NONE or empty, disable instrumental mode
+    if args.instrumentalPrefix and args.instrumentalPrefix.upper() == 'NONE':
+        if args.debug:
+            mmguero.eprint('Instrumental mode disabled (NONE specified)')
+        args.instrumentalPrefix = None
+        args.instrumentalFile = None
+
+    if has_wildcards and args.speechRecMode == SPEECH_REC_MODE_GROQ:
+        # Wildcard mode with vocal detection
+        vocal_files, instrumental_files, output_files = expand_and_detect_vocals(
+            args.input, args.output, args
+        )
+
+        if not vocal_files:
+            mmguero.eprint('No vocal files found to process. All files appear to be instrumentals.')
+            sys.exit(0)
+
+        mmguero.eprint(f'\nProcessing {len(vocal_files)} file(s) with vocals...\n')
+
+        # Process each vocal file
+        for idx, (input_file, output_file) in enumerate(zip(vocal_files, output_files), 1):
+            mmguero.eprint(f'\n[{idx}/{len(vocal_files)}] Processing: {os.path.basename(input_file)}')
+
+            # Create a copy of args and modify input/output
+            args_copy = argparse.Namespace(**vars(args))
+            args_copy.input = input_file
+            args_copy.output = output_file
+
+            # Find instrumental file for this specific file if using AUTO/prefix mode
+            if args_copy.instrumentalPrefix and not args_copy.instrumentalFile:
+                import glob
+                from difflib import SequenceMatcher
+
+                input_dir = os.path.dirname(input_file)
+                if not input_dir:
+                    input_dir = '.'
+
+                input_basename = os.path.basename(input_file)
+                input_name, input_ext = os.path.splitext(input_basename)
+
+                # AUTO mode - fuzzy matching
+                if args_copy.instrumentalPrefix.upper() == 'AUTO':
+                    if args_copy.debug:
+                        mmguero.eprint(f'AUTO mode: Searching for instrumental file using fuzzy matching')
+
+                    # Get all audio files in the directory
+                    audio_extensions = ['.mp3', '.mp4', '.m4a', '.wav', '.flac', '.ogg', '.aac', '.wma']
+                    all_files = []
+
+                    for ext in audio_extensions:
+                        all_files.extend(glob.glob(os.path.join(input_dir, f'*{ext}')))
+
+                    # Filter out the input file itself
+                    other_files = [f for f in all_files if os.path.basename(f) != input_basename]
+
+                    # Two-way fuzzy matching with validation
+                    candidates_with_scores = []
+                    for candidate in other_files:
+                        candidate_basename = os.path.basename(candidate)
+                        candidate_name, _ = os.path.splitext(candidate_basename)
+
+                        ratio = SequenceMatcher(None, input_name.lower(), candidate_name.lower()).ratio()
+
+                        if args_copy.debug:
+                            mmguero.eprint(f'  {candidate_basename}: similarity={ratio:.3f}')
+
+                        if ratio < 1.0:
+                            candidates_with_scores.append((candidate, ratio))
+
+                    candidates_with_scores.sort(key=lambda x: x[1], reverse=True)
+                    top_candidates = candidates_with_scores[:args_copy.instrumentalAutoCandidates]
+
+                    validated_candidates = []
+                    for candidate, candidate_to_input_score in top_candidates:
+                        candidate_basename = os.path.basename(candidate)
+                        candidate_name, _ = os.path.splitext(candidate_basename)
+
+                        best_other_score = 0.0
+                        best_other_match = None
+
+                        for other_file in all_files:
+                            other_basename = os.path.basename(other_file)
+                            if other_basename != input_basename and other_basename != candidate_basename:
+                                other_name, _ = os.path.splitext(other_basename)
+                                other_score = SequenceMatcher(None, candidate_name.lower(), other_name.lower()).ratio()
+
+                                if other_score > best_other_score:
+                                    best_other_score = other_score
+                                    best_other_match = other_basename
+
+                        if args_copy.debug:
+                            mmguero.eprint(f'  Validating {candidate_basename}:')
+                            mmguero.eprint(f'    to input: {candidate_to_input_score:.3f}')
+                            mmguero.eprint(f'    to best other ({best_other_match}): {best_other_score:.3f}')
+
+                        if candidate_to_input_score > best_other_score:
+                            validated_candidates.append((candidate, candidate_to_input_score))
+                            if args_copy.debug:
+                                mmguero.eprint(f'    ✓ PASSED validation')
+                        else:
+                            if args_copy.debug:
+                                mmguero.eprint(f'    ✗ FAILED validation')
+
+                    if validated_candidates:
+                        best_match, best_ratio = validated_candidates[0]
+                        if best_ratio >= 0.3:
+                            args_copy.instrumentalFile = best_match
+                            if args_copy.debug:
+                                mmguero.eprint(f'AUTO mode matched: {os.path.basename(best_match)} (similarity: {best_ratio:.3f})')
+                        else:
+                            mmguero.eprint(f'  Falling back to mute mode (no validated match above threshold)')
+                    else:
+                        mmguero.eprint(f'  Falling back to mute mode (all candidates failed validation)')
+
+            # Process this file
+            plug = GroqPlugger(
+                args_copy.input,
+                args_copy.output,
+                args_copy.outputFormat,
+                args_copy.swears,
+                args_copy.groqApiKey,
+                args_copy.groqModel,
+                args_copy.outputJson,
+                inputTranscript=args_copy.inputTranscript,
+                saveTranscript=args_copy.saveTranscript,
+                forceRetranscribe=args_copy.forceRetranscribe,
+                aParams=args_copy.aParams,
+                aChannels=args_copy.aChannels,
+                aSampleRate=args_copy.aSampleRate,
+                aBitRate=args_copy.aBitRate,
+                aVorbisQscale=args_copy.aVorbisQscale,
+                padMsecPre=args_copy.padMsecPre if args_copy.padMsecPre > 0 else args_copy.padMsec,
+                padMsecPost=args_copy.padMsecPost if args_copy.padMsecPost > 0 else args_copy.padMsec,
+                beep=args_copy.beep,
+                beepHertz=args_copy.beepHertz,
+                beepMixNormalize=args_copy.beepMixNormalize,
+                beepAudioWeight=args_copy.beepAudioWeight,
+                beepSineWeight=args_copy.beepSineWeight,
+                beepDropTransition=args_copy.beepDropTransition,
+                force=args_copy.forceDespiteTag,
+                dbug=args_copy.debug,
+                instrumentalFileSpec=args_copy.instrumentalFile,
+                verbose_level=args_copy.verbose_level if hasattr(args_copy, 'verbose_level') else "",
+            )
+
+            print(plug.EncodeCleanAudio())
+
+        mmguero.eprint(f'\n✓ Completed processing {len(vocal_files)} file(s)')
+        mmguero.eprint(f'Skipped {len(instrumental_files)} instrumental file(s)')
+        sys.exit(0)
+
+    # Single file mode (no wildcards or not using Groq mode)
+    # Find instrumental file if prefix is specified
+    if args.instrumentalPrefix and not args.instrumentalFile:
+        import glob
+        from difflib import SequenceMatcher
+
+        input_dir = os.path.dirname(args.input)
+        if not input_dir:
+            input_dir = '.'
+
+        input_basename = os.path.basename(args.input)
+        input_name, input_ext = os.path.splitext(input_basename)
+
+        # AUTO mode - fuzzy matching
+        if args.instrumentalPrefix.upper() == 'AUTO':
+            if args.debug:
+                mmguero.eprint(f'AUTO mode: Searching for instrumental file using fuzzy matching')
+
+            # Get all audio files in the directory
+            audio_extensions = ['.mp3', '.mp4', '.m4a', '.wav', '.flac', '.ogg', '.aac', '.wma']
+            all_files = []
+
+            for ext in audio_extensions:
+                all_files.extend(glob.glob(os.path.join(input_dir, f'*{ext}')))
+
+            # Filter out the input file itself
+            other_files = [f for f in all_files if os.path.basename(f) != input_basename]
+
+            if not other_files:
+                mmguero.eprint(f'Warning: AUTO mode found no other audio files in directory')
+            else:
+                # Two-way fuzzy matching with validation
+                # Step 1: Find top N candidates by similarity to input
+                candidates_with_scores = []
+                for candidate in other_files:
+                    candidate_basename = os.path.basename(candidate)
+                    candidate_name, _ = os.path.splitext(candidate_basename)
+
+                    # Calculate similarity ratio (0 to 1)
+                    ratio = SequenceMatcher(None, input_name.lower(), candidate_name.lower()).ratio()
+
+                    if args.debug:
+                        mmguero.eprint(f'  {candidate_basename}: similarity={ratio:.3f}')
+
+                    if ratio < 1.0:  # Don't match the exact same file
+                        candidates_with_scores.append((candidate, ratio))
+
+                # Sort by score descending, take top N
+                candidates_with_scores.sort(key=lambda x: x[1], reverse=True)
+                top_candidates = candidates_with_scores[:args.instrumentalAutoCandidates]
+
+                if args.debug and top_candidates:
+                    mmguero.eprint(f'Top {len(top_candidates)} candidates: {[os.path.basename(c[0]) for c in top_candidates]}')
+
+                # Step 2: Validate each candidate with two-way check
+                validated_candidates = []
+                for candidate, candidate_to_input_score in top_candidates:
+                    candidate_basename = os.path.basename(candidate)
+                    candidate_name, _ = os.path.splitext(candidate_basename)
+
+                    # Find candidate's best match among ALL files (except input and itself)
+                    best_other_score = 0.0
+                    best_other_match = None
+
+                    for other_file in all_files:
+                        other_basename = os.path.basename(other_file)
+                        if other_basename != input_basename and other_basename != candidate_basename:
+                            other_name, _ = os.path.splitext(other_basename)
+
+                            # Calculate similarity between candidate and this other file
+                            other_score = SequenceMatcher(None, candidate_name.lower(), other_name.lower()).ratio()
+
+                            if other_score > best_other_score:
+                                best_other_score = other_score
+                                best_other_match = other_basename
+
+                    # Validation: candidate must be more similar to input than to any other file
+                    if args.debug:
+                        mmguero.eprint(f'  Validating {candidate_basename}:')
+                        mmguero.eprint(f'    to input: {candidate_to_input_score:.3f}')
+                        mmguero.eprint(f'    to best other ({best_other_match}): {best_other_score:.3f}')
+
+                    if candidate_to_input_score > best_other_score:
+                        validated_candidates.append((candidate, candidate_to_input_score))
+                        if args.debug:
+                            mmguero.eprint(f'    ✓ PASSED validation')
+                    else:
+                        if args.debug:
+                            mmguero.eprint(f'    ✗ FAILED validation (better match with {best_other_match})')
+
+                # Step 3: Use best validated candidate
+                if validated_candidates:
+                    best_match, best_ratio = validated_candidates[0]  # Already sorted by score
+                    if best_ratio >= 0.3:  # 30% similarity threshold
+                        args.instrumentalFile = best_match
+                        if args.debug:
+                            mmguero.eprint(f'AUTO mode matched: {os.path.basename(best_match)} (similarity: {best_ratio:.3f})')
+                    else:
+                        mmguero.eprint(f'Warning: AUTO mode found candidates but all below 30% threshold')
+                        mmguero.eprint(f'Best validated match was {os.path.basename(best_match)} with similarity {best_ratio:.3f}')
+                        mmguero.eprint(f'Falling back to mute mode')
+                else:
+                    mmguero.eprint(f'Warning: AUTO mode could not find a validated instrumental file')
+                    mmguero.eprint(f'All top candidates failed two-way validation (likely belong to other songs)')
+                    mmguero.eprint(f'Falling back to mute mode')
+        else:
+            # Pattern-based search with specified prefix
+            # Common patterns to search for
+            patterns = [
+                f"{input_name}_{args.instrumentalPrefix}{input_ext}",  # song_instrumental.mp3
+                f"{input_name}-{args.instrumentalPrefix}{input_ext}",  # song-instrumental.mp3
+                f"{input_name}{args.instrumentalPrefix}{input_ext}",   # songinstrumental.mp3
+                f"{args.instrumentalPrefix}_{input_name}{input_ext}",  # instrumental_song.mp3
+                f"{args.instrumentalPrefix}-{input_name}{input_ext}",  # instrumental-song.mp3
+            ]
+
+            if args.debug:
+                mmguero.eprint(f'Searching for instrumental file with prefix: {args.instrumentalPrefix}')
+                mmguero.eprint(f'Patterns: {patterns}')
+
+            found = False
+            for pattern in patterns:
+                search_path = os.path.join(input_dir, pattern)
+                matches = glob.glob(search_path)
+                if matches:
+                    args.instrumentalFile = matches[0]
+                    found = True
+                    if args.debug:
+                        mmguero.eprint(f'Found instrumental file: {args.instrumentalFile}')
+                    break
+
+            if not found:
+                mmguero.eprint(f'Warning: Could not find instrumental file matching prefix "{args.instrumentalPrefix}"')
+                mmguero.eprint(f'Searched for patterns: {patterns}')
+                mmguero.eprint(f'You can specify the full path with --instrumental instead')
 
     if args.speechRecMode == SPEECH_REC_MODE_VOSK:
         pathlib.Path(args.voskModelDir).mkdir(parents=True, exist_ok=True)
@@ -1305,6 +2379,37 @@ def RunMonkeyPlug():
             beepDropTransition=args.beepDropTransition,
             force=args.forceDespiteTag,
             dbug=args.debug,
+        )
+
+    elif args.speechRecMode == SPEECH_REC_MODE_GROQ:
+        plug = GroqPlugger(
+            args.input,
+            args.output,
+            args.outputFormat,
+            args.swears,
+            args.groqApiKey,
+            args.groqModel,
+            args.outputJson,
+            inputTranscript=args.inputTranscript,
+            saveTranscript=args.saveTranscript,
+            forceRetranscribe=args.forceRetranscribe,
+            aParams=args.aParams,
+            aChannels=args.aChannels,
+            aSampleRate=args.aSampleRate,
+            aBitRate=args.aBitRate,
+            aVorbisQscale=args.aVorbisQscale,
+            padMsecPre=args.padMsecPre if args.padMsecPre > 0 else args.padMsec,
+            padMsecPost=args.padMsecPost if args.padMsecPost > 0 else args.padMsec,
+            beep=args.beep,
+            beepHertz=args.beepHertz,
+            beepMixNormalize=args.beepMixNormalize,
+            beepAudioWeight=args.beepAudioWeight,
+            beepSineWeight=args.beepSineWeight,
+            beepDropTransition=args.beepDropTransition,
+            force=args.forceDespiteTag,
+            dbug=args.debug,
+            instrumentalFileSpec=args.instrumentalFile,
+            verbose_level=args.verbose_level if hasattr(args, 'verbose_level') else "",
         )
     else:
         raise ValueError(f"Unsupported speech recognition engine {args.speechRecMode}")

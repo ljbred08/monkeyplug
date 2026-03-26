@@ -137,3 +137,6 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Groq API key files
+.groq_key
