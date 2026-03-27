@@ -1,0 +1,20 @@
+{
+  "_comment": "Example monkeyplug config file - Copy to .monkeyplug.json and customize",
+  "_comment_locations": [
+    "Project-specific: ./.monkeyplug.json (in current directory)",
+    "User-specific: ~/.monkeyplug/config.json (in your home directory)"
+  ],
+
+  "_comment_padding": "Padding settings (in milliseconds)",
+  "pad_milliseconds": 10,
+  "pad_milliseconds_pre": 10,
+  "pad_milliseconds_post": 10,
+
+  "_comment_separation": "AI instrumental separation settings",
+  "separation_padding": 1.0,
+
+  "_comment_beep": "Beep settings",
+  "beep_hertz": 1000,
+
+  "_comment_note": "Values in this file can be overridden by command-line arguments"
+}

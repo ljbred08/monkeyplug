@@ -478,6 +478,18 @@ class Plugger(object):
         if os.path.isfile(self.tmpDownloadedFileSpec):
             os.remove(self.tmpDownloadedFileSpec)
 
+        # Clean up temporary separation files
+        if hasattr(self, 'separationCacheDir') and self.separationCacheDir:
+            import shutil
+            try:
+                if os.path.exists(self.separationCacheDir):
+                    shutil.rmtree(self.separationCacheDir)
+                    if self.debug:
+                        mmguero.eprint(f'Cleaned up separation cache: {self.separationCacheDir}')
+            except Exception as e:
+                if self.debug:
+                    mmguero.eprint(f'Warning: Failed to cleanup separation cache: {e}')
+
     ######## _ensure_directory_exists #############################################
     def _ensure_directory_exists(self, filepath, description="directory"):
         """Ensure the directory for a file path exists, creating it if necessary"""
@@ -663,7 +675,29 @@ class Plugger(object):
 
         self.naughtyWordList = [word for word in self.wordList if word["scrub"] is True]
 
-        # Handle instrumental mode or traditional mute/beep mode
+        # Handle auto-generation mode
+        if hasattr(self, 'autoGenerateMode') and self.autoGenerateMode and len(self.naughtyWordList) > 0:
+            # Create merged profanity segments
+            self._create_instrumental_splice_list()
+
+            # Extract, separate, and get instrumental file
+            if self.instrumentalSegments:
+                try:
+                    self.instrumentalFileSpec = self._create_combined_profanity_file()
+                    if self.instrumentalFileSpec:
+                        self.instrumentalMode = True
+                        self._build_instrumental_filters()
+                        return []  # Return empty list for muteTimeList
+                except Exception as e:
+                    # Fallback to mute if generation fails
+                    if self.debug:
+                        mmguero.eprint(f"Generation failed: {e}, falling back to mute mode")
+                    self.instrumentalMode = False
+                    return self._create_mute_beep_list()
+            else:
+                return []
+
+        # Handle traditional instrumental file mode or mute/beep mode
         if self.instrumentalMode:
             return self._create_instrumental_splice_list()
         else:
@@ -756,45 +790,99 @@ class Plugger(object):
         return self.muteTimeList
 
     def _build_instrumental_filters(self):
-        """Build FFmpeg filter complex for instrumental splicing"""
+        """Build FFmpeg filter complex for instrumental splicing
+
+        Supports both:
+        - Traditional instrumental file (instrumentalFileSpec provided by user)
+        - Auto-generated combined file (autoGenerateMode with segMapping)
+        """
         if not self.instrumentalSegments:
             return []
 
-        # Build filter complex - alternate between original [0:a] and instrumental [1:a]
+        duration = self._get_file_duration(self.inputFileSpec)
         filter_parts = []
-
         seg_index = 0
         last_end = 0.0
 
-        # Process each profanity segment
-        for start, end in self.instrumentalSegments:
-            # Add original audio segment before profanity (from input 0)
-            if start > last_end:
+        if hasattr(self, 'autoGenerateMode') and self.autoGenerateMode and hasattr(self, 'segMapping') and self.segMapping:
+            # AUTO-SEPARATION MODE: Use segMapping to translate timestamps
+            for idx, (orig_start, orig_end) in enumerate(self.instrumentalSegments):
+                # Get the mapping for this segment
+                if idx < len(self.segMapping):
+                    profanity_start, profanity_end, combined_start, combined_end, padded_start, padded_end = self.segMapping[idx]
+                else:
+                    # Fallback: shouldn't happen
+                    if orig_start > last_end:
+                        filter_parts.append(f"[0:a]atrim={last_end:.2f}:{orig_start:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]")
+                        seg_index += 1
+                    filter_parts.append(f"[0:a]atrim={orig_start:.2f}:{orig_end:.2f},volume=0[seg{seg_index}]")
+                    seg_index += 1
+                    last_end = orig_end
+                    continue
+
+                # Original audio before profanity
+                if orig_start > last_end:
+                    filter_parts.append(f"[0:a]atrim={last_end:.2f}:{orig_start:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]")
+                    seg_index += 1
+
+                # Extract the profanity portion from the combined instrumental file
+                # Calculate the position in the combined file where profanity starts
+                # combined_start = where this padded segment is in combined file
+                # (profanity_start - padded_start) = offset of profanity within the padded segment
+                position_in_combined = combined_start + (profanity_start - padded_start)
+                profanity_duration = profanity_end - profanity_start
+
                 filter_parts.append(
-                    f"[0:a]atrim={last_end:.2f}:{start:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
+                    f"[1:a]atrim={position_in_combined:.2f}:{position_in_combined + profanity_duration:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
                 )
                 seg_index += 1
 
-            # Add instrumental audio segment for profanity (from input 1)
+                last_end = orig_end
+
+            # Final original audio segment
+            if last_end < duration:
+                filter_parts.append(f"[0:a]atrim={last_end:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]")
+                seg_index += 1
+
+            # Concatenate all segments
+            concat_input = ''.join([f'[seg{i}]' for i in range(seg_index)])
+            filter_parts.append(f"{concat_input}concat=n={seg_index}:v=0:a=1[outa]")
+
+        else:
+            # TRADITIONAL MODE: Use provided instrumental file
+            # Original logic works fine here
+            filter_parts.append("[0:a]asplit=2[orig][inst]")
+
+            seg_index = 0
+            last_end = 0.0
+
+            for start, end in self.instrumentalSegments:
+                # Add original audio segment before profanity
+                if start > last_end:
+                    filter_parts.append(
+                        f"[orig]atrim={last_end:.2f}:{start:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
+                    )
+                    seg_index += 1
+
+                # Add instrumental audio segment for profanity
+                filter_parts.append(
+                    f"[inst]atrim={start:.2f}:{end:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
+                )
+                seg_index += 1
+
+                last_end = end
+
+            # Add final original audio segment after last profanity
             filter_parts.append(
-                f"[1:a]atrim={start:.2f}:{end:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
+                f"[orig]atrim={last_end:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
             )
             seg_index += 1
 
-            last_end = end
-
-        # Add final original audio segment after last profanity (from input 0)
-        # No end timestamp needed - goes to end of file
-        filter_parts.append(
-            f"[0:a]atrim={last_end:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
-        )
-        seg_index += 1
-
-        # Concatenate all segments
-        concat_input = ''.join([f'[seg{i}]' for i in range(seg_index)])
-        filter_parts.append(
-            f"{concat_input}concat=n={seg_index}:v=0:a=1[outa]"
-        )
+            # Concatenate all segments
+            concat_input = ''.join([f'[seg{i}]' for i in range(seg_index)])
+            filter_parts.append(
+                f"{concat_input}concat=n={seg_index}:v=0:a=1[outa]"
+            )
 
         filter_complex = ';'.join(filter_parts)
 
@@ -803,7 +891,8 @@ class Plugger(object):
                 mmguero.eprint(f'Filter complex: {filter_complex}')
             else:
                 # Concise mode: just show segment count
-                mmguero.eprint(f'Building FFmpeg filter with {len(self.instrumentalSegments)} instrumental segment(s)')
+                mode = "auto-separation" if (hasattr(self, 'autoGenerateMode') and self.autoGenerateMode) else "traditional"
+                mmguero.eprint(f'Building FFmpeg filter with {len(self.instrumentalSegments)} instrumental segment(s) ({mode} mode)')
 
         return ['-filter_complex', filter_complex, '-map', '[outa]']
 
@@ -1245,6 +1334,8 @@ class GroqPlugger(Plugger):
         dbug=False,
         instrumentalFileSpec=None,
         verbose_level="",
+        auto_generate=False,
+        separation_padding=1.0,
     ):
         # Import groq_config - handle both relative and absolute imports
         try:
@@ -1289,6 +1380,26 @@ class GroqPlugger(Plugger):
             dbug=dbug,
             instrumentalFileSpec=instrumentalFileSpec,
         )
+
+        # Initialize auto-separation mode
+        self.autoGenerateMode = auto_generate
+        self.separationPadding = separation_padding
+        self.separationCacheDir = None
+        self.segMapping = []  # Timestamp mapping for combined file
+        self.separator = None
+
+        if self.autoGenerateMode:
+            try:
+                from .separation import SourceSeparator
+            except ImportError:
+                from monkeyplug.separation import SourceSeparator
+
+            import tempfile
+            self.separator = SourceSeparator(debug=self.debug)
+            self.separationCacheDir = tempfile.mkdtemp(prefix="monkeyplug_separation_")
+            if self.debug:
+                mmguero.eprint(f'Auto-separation mode enabled (padding: {self.separationPadding}s)')
+                mmguero.eprint(f'Cache directory: {self.separationCacheDir}')
 
         if self.debug:
             if inputTranscript:
@@ -1525,6 +1636,115 @@ class GroqPlugger(Plugger):
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+    def _extract_combined_segments(self, output_file):
+        """
+        Extract all profanity segments with padding and concatenate into one file
+        Uses FFmpeg filter_complex to concatenate segments
+        Tracks mapping between original timestamps and combined file timestamps
+
+        Returns:
+            float: Total duration of combined file, or 0 if failed
+        """
+        if not self.instrumentalSegments:
+            return 0.0
+
+        duration = self._get_file_duration(self.inputFileSpec)
+
+        # Build filter to extract and concatenate all profanity segments
+        filter_parts = []
+        seg_index = 0
+        combined_time = 0.0  # Track current position in combined file
+
+        for start, end in self.instrumentalSegments:
+            # Add padding
+            padded_start = max(0, start - self.separationPadding)
+            padded_end = min(duration, end + self.separationPadding)
+            segment_duration = padded_end - padded_start
+
+            # Extract this segment
+            filter_parts.append(
+                f"[0:a]atrim={padded_start:.2f}:{padded_end:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
+            )
+
+            # Track mapping: where this original segment appears in combined file
+            # Format: (original profanity start, original profanity end,
+            #          combined file start, combined file end,
+            #          padded segment start, padded segment end)
+            padded_start = max(0, start - self.separationPadding)
+            padded_end = min(duration, end + self.separationPadding)
+            self.segMapping.append((
+                start,  # Original profanity start
+                end,    # Original profanity end
+                combined_time,  # Start position in combined file
+                combined_time + segment_duration,  # End position in combined file
+                padded_start,  # Padded segment start (for offset calculation)
+                padded_end,    # Padded segment end (for offset calculation)
+            ))
+
+            combined_time += segment_duration
+            seg_index += 1
+
+        # Concatenate all segments
+        concat_input = ''.join([f'[seg{i}]' for i in range(seg_index)])
+        filter_parts.append(f"{concat_input}concat=n={seg_index}:v=0:a=1[outa]")
+
+        filter_complex = ';'.join(filter_parts)
+
+        # Run ffmpeg to extract and concatenate
+        ffmpegCmd = [
+            'ffmpeg', '-nostdin', '-hide_banner', '-nostats', '-loglevel', 'error',
+            '-y',
+            '-i', self.inputFileSpec,
+            '-filter_complex', filter_complex,
+            '-map', '[outa]',
+            '-acodec', 'pcm_s16le',  # WAV for sherpa-onnx
+            '-ar', '44100',
+            '-ac', '2',
+            output_file
+        ]
+
+        result, _ = mmguero.run_process(ffmpegCmd, stdout=False, stderr=False, debug=self.debug)
+
+        if result != 0:
+            raise IOError("Failed to extract combined profanity segments")
+
+        # Return duration of combined file
+        return self._get_file_duration(output_file)
+
+    def _create_combined_profanity_file(self):
+        """
+        Extract all profanity segments (with padding) into a single continuous file
+        and separate it into instrumental
+
+        Also creates timestamp mapping: where each original segment appears in the combined file
+
+        Returns:
+            str: Path to the combined instrumental file
+        """
+        if not self.instrumentalSegments:
+            return None
+
+        # Step 1: Extract all profanity segments (with padding) into one file
+        # Also track the mapping between original timestamps and combined file timestamps
+        combined_file = os.path.join(self.separationCacheDir, "combined_profanity.wav")
+        self.segMapping = []  # Reset mapping
+
+        segment_duration = self._extract_combined_segments(combined_file)
+
+        if not segment_duration:
+            return None
+
+        if self.debug:
+            mmguero.eprint(f'Extracted {len(self.instrumentalSegments)} profanity segment(s) into combined file ({segment_duration:.2f}s)')
+
+        # Step 2: Separate the combined file
+        instrumental_path, vocals_path = self.separator.separate_audio_file(
+            combined_file,
+            self.separationCacheDir
+        )
+
+        return instrumental_path
+
 
 #################################################################################
 
@@ -1671,6 +1891,45 @@ def expand_and_detect_vocals(input_pattern, output_pattern, args):
 
 
 ###################################################################################################
+# Config file loading
+def load_config_settings(debug=False):
+    """
+    Load settings from JSON config file.
+
+    Config file search order (first found wins):
+    1. ./.monkeyplug.json (current directory, project-specific)
+    2. ~/.monkeyplug/config.json (user-specific)
+
+    Returns:
+        dict: Config settings (empty dict if no config found)
+    """
+    config_paths = [
+        os.path.join(os.getcwd(), '.monkeyplug.json'),
+        os.path.join(os.path.expanduser('~'), '.monkeyplug', 'config.json'),
+    ]
+
+    for config_path in config_paths:
+        if os.path.isfile(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+
+                if debug:
+                    mmguero.eprint(f"Loaded config from: {config_path}")
+
+                return config
+            except (json.JSONDecodeError, IOError) as e:
+                if debug:
+                    mmguero.eprint(f"Warning: Failed to load config from {config_path}: {e}")
+                continue
+
+    if debug:
+        mmguero.eprint("No config file found, using defaults")
+
+    return {}
+
+
+###################################################################################################
 # RunMonkeyPlug
 def RunMonkeyPlug():
 
@@ -1680,6 +1939,9 @@ def RunMonkeyPlug():
         version = metadata.get("Version", "unknown")
     except importlib.metadata.PackageNotFoundError:
         version = "source"
+
+    # Load config file for default values (can be overridden by CLI args)
+    config = load_config_settings(debug=False)
 
     parser = argparse.ArgumentParser(
         description=f"{package_name} (v{version})",
@@ -1771,8 +2033,8 @@ def RunMonkeyPlug():
         type=str,
         default=None,
         required=False,
-        metavar="<string>",
-        help="Instrumental version of the audio file for splicing profanity sections",
+        metavar="<mode|file>",
+        help="Instrumental mode: 'auto' (default, try prefix search then generate), 'generate' (AI generation), 'prefix' (search with --instrumental-prefix), or file path",
     )
     parser.add_argument(
         "--instrumental-prefix",
@@ -1791,6 +2053,21 @@ def RunMonkeyPlug():
         required=False,
         metavar="<int>",
         help="Number of top candidates to validate in AUTO mode (default: 5)",
+    )
+    parser.add_argument(
+        "--separation-padding",
+        dest="separationPadding",
+        type=float,
+        default=config.get("separation_padding", 1.0),
+        metavar="<seconds>",
+        help=f"Context padding for AI generation (default: {config.get('separation_padding', 1.0)} seconds)",
+    )
+    parser.add_argument(
+        "--mute",
+        dest="mute",
+        action="store_true",
+        default=False,
+        help="Force mute mode (disable instrumental processing)",
     )
     parser.add_argument(
         "-a",
@@ -1850,24 +2127,24 @@ def RunMonkeyPlug():
         dest="padMsec",
         metavar="<int>",
         type=int,
-        default=80,
-        help="Milliseconds to pad on either side of muted segments (default: 80)",
+        default=config.get("pad_milliseconds", 10),
+        help=f"Milliseconds to pad on either side of muted segments (default: {config.get('pad_milliseconds', 10)})",
     )
     parser.add_argument(
         "--pad-milliseconds-pre",
         dest="padMsecPre",
         metavar="<int>",
         type=int,
-        default=80,
-        help="Milliseconds to pad before muted segments (default: 80)",
+        default=config.get("pad_milliseconds_pre", 10),
+        help=f"Milliseconds to pad before muted segments (default: {config.get('pad_milliseconds_pre', 10)})",
     )
     parser.add_argument(
         "--pad-milliseconds-post",
         dest="padMsecPost",
         metavar="<int>",
         type=int,
-        default=80,
-        help="Milliseconds to pad after muted segments (default: 80)",
+        default=config.get("pad_milliseconds_post", 10),
+        help=f"Milliseconds to pad after muted segments (default: {config.get('pad_milliseconds_post', 10)})",
     )
     parser.add_argument(
         "-b",
@@ -1886,8 +2163,8 @@ def RunMonkeyPlug():
         dest="beepHertz",
         metavar="<int>",
         type=int,
-        default=BEEP_HERTZ_DEFAULT,
-        help=f"Beep frequency hertz (default: {BEEP_HERTZ_DEFAULT})",
+        default=config.get("beep_hertz", BEEP_HERTZ_DEFAULT),
+        help=f"Beep frequency hertz (default: {config.get('beep_hertz', BEEP_HERTZ_DEFAULT)})",
     )
     parser.add_argument(
         "--beep-mix-normalize",
@@ -2026,12 +2303,79 @@ def RunMonkeyPlug():
     # Check if wildcards are present in input or output
     has_wildcards = '*' in args.input or '*' in args.output
 
-    # If beep mode is enabled, disable instrumental mode (beep takes precedence)
-    if args.beep:
+    # Process instrumental mode arguments
+    auto_generate = False
+    auto_mode_requested = False  # Track if --instrumental auto was used
+
+    # Mode priority: mute > beep > instrumental
+    if args.mute:
+        # Mute mode: disable all instrumental processing
+        if args.debug:
+            mmguero.eprint('Mute mode - disabling instrumental processing')
+        args.instrumentalPrefix = None
+        args.instrumentalFile = None
+        auto_generate = False
+
+    elif args.beep:
+        # Beep mode: disable all instrumental processing (beep takes precedence)
         if args.debug:
             mmguero.eprint('Beep mode enabled - disabling instrumental mode')
         args.instrumentalPrefix = None
         args.instrumentalFile = None
+        auto_generate = False
+
+    # Process instrumental mode arguments
+    # Default to auto mode if no instrumental flag provided or instrumentalPrefix is default "AUTO"
+    elif args.instrumentalFile is None and (args.instrumentalPrefix is None or args.instrumentalPrefix == "AUTO"):
+        # No --instrumental flag provided, default to auto mode
+        auto_mode_requested = True
+        args.instrumentalPrefix = "AUTO"
+        if args.debug:
+            mmguero.eprint('Default: Auto mode (try prefix search → if not found, generate)')
+
+    elif args.instrumentalFile:
+        # If --instrumental was provided with a value
+        instrumental_mode = args.instrumentalFile.lower()
+
+        if instrumental_mode == "auto":
+            # Auto mode: try prefix search first, if not found, generate
+            auto_mode_requested = True  # Track that auto mode was requested
+            args.instrumentalFile = None  # Clear mode keyword so it's not treated as filename
+            if not args.instrumentalPrefix:
+                args.instrumentalPrefix = "AUTO"  # Set default for auto mode
+
+            # The search will be done later; if not found, we'll set auto_generate
+            if args.debug:
+                mmguero.eprint('Auto mode: Will try prefix search first, then generate if needed')
+
+        elif instrumental_mode == "generate":
+            # Generate mode: force AI generation
+            auto_generate = True
+            args.instrumentalFile = None  # Clear mode keyword so it's not treated as filename
+            if args.debug:
+                mmguero.eprint('Generate mode: Will use AI to generate instrumental')
+
+        elif instrumental_mode == "prefix":
+            # Prefix mode: search with --instrumental-prefix value
+            args.instrumentalFile = None  # Clear mode keyword so it's not treated as filename
+            if not args.instrumentalPrefix:
+                args.instrumentalPrefix = "AUTO"  # Default to AUTO if not specified
+            if args.debug:
+                mmguero.eprint(f'Prefix mode: Searching for instrumental with prefix "{args.instrumentalPrefix}"')
+
+        else:
+            # Treat as filename - already set in args.instrumentalFile
+            if args.debug:
+                mmguero.eprint(f'Using specified instrumental file: {args.instrumentalFile}')
+
+    # If instrumentalPrefix is explicitly set to NONE or empty, disable instrumental mode
+    if args.instrumentalPrefix and args.instrumentalPrefix.upper() == 'NONE':
+        if args.debug:
+            mmguero.eprint('Instrumental mode disabled (NONE specified)')
+        args.instrumentalPrefix = None
+        args.instrumentalFile = None
+        auto_generate = False
+        auto_mode_requested = False
 
     # If instrumentalPrefix is explicitly set to NONE or empty, disable instrumental mode
     if args.instrumentalPrefix and args.instrumentalPrefix.upper() == 'NONE':
@@ -2085,8 +2429,32 @@ def RunMonkeyPlug():
                     for ext in audio_extensions:
                         all_files.extend(glob.glob(os.path.join(input_dir, f'*{ext}')))
 
-                    # Filter out the input file itself
-                    other_files = [f for f in all_files if os.path.basename(f) != input_basename]
+                    # Filter out the input file itself and any files matching output pattern
+                    def pattern_to_regex(pattern):
+                        """Convert wildcard pattern to regex for matching"""
+                        import re
+                        regex = re.escape(pattern)
+                        regex = regex.replace(r'\*', '.*')
+                        return f'^{regex}$'
+
+                    # If output file is specified, get its pattern to exclude matches
+                    output_pattern_to_exclude = None
+                    if output_file:
+                        # For single file, check exact basename match
+                        output_basename = os.path.basename(output_file)
+                    else:
+                        output_basename = None
+
+                    other_files = []
+                    for f in all_files:
+                        basename = os.path.basename(f)
+                        # Skip input file
+                        if basename == input_basename:
+                            continue
+                        # Skip exact output file match if specified
+                        if output_basename and basename == output_basename:
+                            continue
+                        other_files.append(f)
 
                     # Two-way fuzzy matching with validation
                     candidates_with_scores = []
@@ -2143,11 +2511,26 @@ def RunMonkeyPlug():
                             if args_copy.debug:
                                 mmguero.eprint(f'AUTO mode matched: {os.path.basename(best_match)} (similarity: {best_ratio:.3f})')
                         else:
-                            mmguero.eprint(f'  Falling back to mute mode (no validated match above threshold)')
+                            # Auto mode: no valid match found, enable AI generation
+                            if auto_mode_requested:
+                                if args_copy.debug:
+                                    mmguero.eprint(f'  Auto mode: No validated match above threshold, will use AI generation')
+                            else:
+                                mmguero.eprint(f'  Falling back to mute mode (no validated match above threshold)')
                     else:
-                        mmguero.eprint(f'  Falling back to mute mode (all candidates failed validation)')
+                        # Auto mode: all candidates failed validation, enable AI generation
+                        if auto_mode_requested:
+                            if args_copy.debug:
+                                mmguero.eprint(f'  Auto mode: All candidates failed validation, will use AI generation')
+                        else:
+                            mmguero.eprint(f'  Falling back to mute mode (all candidates failed validation)')
 
             # Process this file
+            # Determine if AI generation should be used for this specific file
+            file_auto_generate = auto_generate
+            if auto_mode_requested and not args_copy.instrumentalFile:
+                file_auto_generate = True
+
             plug = GroqPlugger(
                 args_copy.input,
                 args_copy.output,
@@ -2176,6 +2559,8 @@ def RunMonkeyPlug():
                 dbug=args_copy.debug,
                 instrumentalFileSpec=args_copy.instrumentalFile,
                 verbose_level=args_copy.verbose_level if hasattr(args_copy, 'verbose_level') else "",
+                auto_generate=file_auto_generate,
+                separation_padding=args_copy.separationPadding,
             )
 
             print(plug.EncodeCleanAudio())
@@ -2209,8 +2594,18 @@ def RunMonkeyPlug():
             for ext in audio_extensions:
                 all_files.extend(glob.glob(os.path.join(input_dir, f'*{ext}')))
 
-            # Filter out the input file itself
-            other_files = [f for f in all_files if os.path.basename(f) != input_basename]
+            # Filter out the input file itself and the output file
+            output_basename = os.path.basename(args.output) if args.output else None
+            other_files = []
+            for f in all_files:
+                basename = os.path.basename(f)
+                # Skip input file
+                if basename == input_basename:
+                    continue
+                # Skip exact output file match if specified
+                if output_basename and basename == output_basename:
+                    continue
+                other_files.append(f)
 
             if not other_files:
                 mmguero.eprint(f'Warning: AUTO mode found no other audio files in directory')
@@ -2282,13 +2677,25 @@ def RunMonkeyPlug():
                         if args.debug:
                             mmguero.eprint(f'AUTO mode matched: {os.path.basename(best_match)} (similarity: {best_ratio:.3f})')
                     else:
-                        mmguero.eprint(f'Warning: AUTO mode found candidates but all below 30% threshold')
-                        mmguero.eprint(f'Best validated match was {os.path.basename(best_match)} with similarity {best_ratio:.3f}')
-                        mmguero.eprint(f'Falling back to mute mode')
+                        # Auto mode: no valid match found, will use AI generation
+                        if auto_mode_requested:
+                            mmguero.eprint(f'Warning: AUTO mode found candidates but all below 30% threshold')
+                            mmguero.eprint(f'Best validated match was {os.path.basename(best_match)} with similarity {best_ratio:.3f}')
+                            mmguero.eprint(f'Auto mode: Will use AI to generate instrumental')
+                        else:
+                            mmguero.eprint(f'Warning: AUTO mode found candidates but all below 30% threshold')
+                            mmguero.eprint(f'Best validated match was {os.path.basename(best_match)} with similarity {best_ratio:.3f}')
+                            mmguero.eprint(f'Falling back to mute mode')
                 else:
-                    mmguero.eprint(f'Warning: AUTO mode could not find a validated instrumental file')
-                    mmguero.eprint(f'All top candidates failed two-way validation (likely belong to other songs)')
-                    mmguero.eprint(f'Falling back to mute mode')
+                    # Auto mode: all candidates failed validation, will use AI generation
+                    if auto_mode_requested:
+                        mmguero.eprint(f'Warning: AUTO mode could not find a validated instrumental file')
+                        mmguero.eprint(f'All top candidates failed two-way validation (likely belong to other songs)')
+                        mmguero.eprint(f'Auto mode: Will use AI to generate instrumental')
+                    else:
+                        mmguero.eprint(f'Warning: AUTO mode could not find a validated instrumental file')
+                        mmguero.eprint(f'All top candidates failed two-way validation (likely belong to other songs)')
+                        mmguero.eprint(f'Falling back to mute mode')
         else:
             # Pattern-based search with specified prefix
             # Common patterns to search for
@@ -2318,7 +2725,19 @@ def RunMonkeyPlug():
             if not found:
                 mmguero.eprint(f'Warning: Could not find instrumental file matching prefix "{args.instrumentalPrefix}"')
                 mmguero.eprint(f'Searched for patterns: {patterns}')
-                mmguero.eprint(f'You can specify the full path with --instrumental instead')
+                # If auto mode was requested, enable AI generation
+                if auto_mode_requested:
+                    auto_generate = True
+                    mmguero.eprint(f'Auto mode: No instrumental found, will use AI to generate instrumental')
+                else:
+                    mmguero.eprint(f'You can specify the full path with --instrumental instead')
+
+    # Single file mode: check if we should enable auto_generate after search
+    # If auto mode was requested and no file was found, enable generation
+    if auto_mode_requested and not args.instrumentalFile and not auto_generate:
+        auto_generate = True
+        if args.debug:
+            mmguero.eprint('Auto mode: No instrumental file found, enabling AI generation')
 
     if args.speechRecMode == SPEECH_REC_MODE_VOSK:
         pathlib.Path(args.voskModelDir).mkdir(parents=True, exist_ok=True)
@@ -2410,6 +2829,8 @@ def RunMonkeyPlug():
             dbug=args.debug,
             instrumentalFileSpec=args.instrumentalFile,
             verbose_level=args.verbose_level if hasattr(args, 'verbose_level') else "",
+            auto_generate=auto_generate,
+            separation_padding=args.separationPadding,
         )
     else:
         raise ValueError(f"Unsupported speech recognition engine {args.speechRecMode}")

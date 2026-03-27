@@ -22,6 +22,9 @@ dependencies = [
     "mutagen==1.47.0",
     "requests==2.32.5",
     "groq>=0.1.0",
+    "sherpa-onnx>=1.10.0",
+    "numpy>=1.24.0",
+    "soundfile>=0.12.0",
 ]
 
 [project.urls]
@@ -34,6 +37,17 @@ include = [
     "src/monkeyplug/**/*.py",
     "src/monkeyplug/data/*.json",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/monkeyplug"]
+
+[tool.hatch.build.targets.wheel.shared-data]
+"src/monkeyplug/data" = "monkeyplug/data"
+
+# Ensure editable installs use the src directory directly
+[tool.hatch.build.targets.editable]
+packages = ["src/monkeyplug"]
+shared-data = {"src/monkeyplug/data" = "monkeyplug/data"}
 
 [project.scripts]
 monkeyplug = "monkeyplug:RunMonkeyPlug"
