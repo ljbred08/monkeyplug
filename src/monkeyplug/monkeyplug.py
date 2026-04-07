@@ -1777,13 +1777,14 @@ def apply_output_pattern(input_file, output_pattern):
     return output_name
 
 
-def expand_and_detect_vocals(input_pattern, output_pattern, args):
+def expand_and_detect_vocals(input_pattern, output_pattern, args, skip_detection=False):
     """Expand wildcards and detect which files have vocals.
 
     Args:
         input_pattern: Input file pattern (e.g., '*.mp3')
         output_pattern: Output file pattern (e.g., '*_clean.mp3')
         args: Parsed command-line arguments
+        skip_detection: If True, assume all files have vocals (used with --instrumental generate)
 
     Returns:
         tuple: (vocal_files, instrumental_files, output_files)
@@ -1835,6 +1836,12 @@ def expand_and_detect_vocals(input_pattern, output_pattern, args):
 
     if args.debug:
         mmguero.eprint(f'Expanded wildcard to {len(input_files)} file(s) (skipped {len(skipped_output_files)} output files)')
+
+    if skip_detection:
+        if args.debug:
+            mmguero.eprint('Skipping vocal detection (generate mode — assuming all files have vocals)')
+        output_files = [apply_output_pattern(f, output_pattern) for f in input_files]
+        return input_files, [], output_files
 
     # Create a GroqPlugger instance just for detection
     # We need to use dummy values for most parameters since we're only detecting vocals
@@ -2085,6 +2092,13 @@ def RunMonkeyPlug():
         default=config.get("separation_padding", 1.0),
         metavar="<seconds>",
         help=f"Context padding for AI generation (default: {config.get('separation_padding', 1.0)} seconds)",
+    )
+    parser.add_argument(
+        "--filter-instrumentals",
+        dest="filterInstrumentals",
+        action="store_true",
+        default=False,
+        help="In wildcard mode with --instrumental generate, filter out files detected as instrumentals (default: process all files)",
     )
     parser.add_argument(
         "--mute",
@@ -2348,6 +2362,7 @@ def RunMonkeyPlug():
     # Process instrumental mode arguments
     auto_generate = False
     auto_mode_requested = False  # Track if --instrumental auto was used
+    skip_detection = False  # Skip vocal detection in wildcard mode (--instrumental generate)
 
     # Mode priority: mute > beep > instrumental
     if args.mute:
@@ -2391,9 +2406,11 @@ def RunMonkeyPlug():
                 mmguero.eprint('Auto mode: Will try prefix search first, then generate if needed')
 
         elif instrumental_mode == "generate":
-            # Generate mode: force AI generation
+            # Generate mode: force AI generation, skip instrumental file search
             auto_generate = True
+            skip_detection = True
             args.instrumentalFile = None  # Clear mode keyword so it's not treated as filename
+            args.instrumentalPrefix = None  # Skip instrumental file search entirely
             if args.debug:
                 mmguero.eprint('Generate mode: Will use AI to generate instrumental')
 
@@ -2426,10 +2443,14 @@ def RunMonkeyPlug():
         args.instrumentalPrefix = None
         args.instrumentalFile = None
 
+    # --filter-instrumentals overrides generate mode's skip_detection
+    if args.filterInstrumentals:
+        skip_detection = False
+
     if has_wildcards and args.speechRecMode == SPEECH_REC_MODE_GROQ:
         # Wildcard mode with vocal detection
         vocal_files, instrumental_files, output_files = expand_and_detect_vocals(
-            args.input, args.output, args
+            args.input, args.output, args, skip_detection=skip_detection
         )
 
         if not vocal_files:
