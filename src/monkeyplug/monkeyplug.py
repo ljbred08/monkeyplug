@@ -2074,7 +2074,7 @@ def RunMonkeyPlug():
         default="AUTO",
         required=False,
         metavar="<string>",
-        help="Prefix/suffix to search for instrumental file, 'AUTO' for fuzzy matching (default), or 'NONE' to disable instrumental mode and use mute/beep instead",
+        help="Prefix/suffix to search for instrumental file, or 'AUTO' for fuzzy matching (default)",
     )
     parser.add_argument(
         "--instrumental-auto-candidates",
@@ -2427,22 +2427,6 @@ def RunMonkeyPlug():
             if args.debug:
                 mmguero.eprint(f'Using specified instrumental file: {args.instrumentalFile}')
 
-    # If instrumentalPrefix is explicitly set to NONE or empty, disable instrumental mode
-    if args.instrumentalPrefix and args.instrumentalPrefix.upper() == 'NONE':
-        if args.debug:
-            mmguero.eprint('Instrumental mode disabled (NONE specified)')
-        args.instrumentalPrefix = None
-        args.instrumentalFile = None
-        auto_generate = False
-        auto_mode_requested = False
-
-    # If instrumentalPrefix is explicitly set to NONE or empty, disable instrumental mode
-    if args.instrumentalPrefix and args.instrumentalPrefix.upper() == 'NONE':
-        if args.debug:
-            mmguero.eprint('Instrumental mode disabled (NONE specified)')
-        args.instrumentalPrefix = None
-        args.instrumentalFile = None
-
     # --filter-instrumentals overrides generate mode's skip_detection
     if args.filterInstrumentals:
         skip_detection = False
@@ -2579,14 +2563,14 @@ def RunMonkeyPlug():
                                 if args_copy.debug:
                                     mmguero.eprint(f'  Auto mode: No validated match above threshold, will use AI generation')
                             else:
-                                mmguero.eprint(f'  Falling back to mute mode (no validated match above threshold)')
+                                mmguero.eprint(f'  No validated match above threshold, will use AI generation')
                     else:
                         # Auto mode: all candidates failed validation, enable AI generation
                         if auto_mode_requested:
                             if args_copy.debug:
                                 mmguero.eprint(f'  Auto mode: All candidates failed validation, will use AI generation')
                         else:
-                            mmguero.eprint(f'  Falling back to mute mode (all candidates failed validation)')
+                            mmguero.eprint(f'  All candidates failed validation, will use AI generation')
 
             # Process this file
             # Determine if AI generation should be used for this specific file
@@ -2748,7 +2732,7 @@ def RunMonkeyPlug():
                         else:
                             mmguero.eprint(f'Warning: AUTO mode found candidates but all below 30% threshold')
                             mmguero.eprint(f'Best validated match was {os.path.basename(best_match)} with similarity {best_ratio:.3f}')
-                            mmguero.eprint(f'Falling back to mute mode')
+                            mmguero.eprint(f'No instrumental file found, will use AI generation')
                 else:
                     # Auto mode: all candidates failed validation, will use AI generation
                     if auto_mode_requested:
@@ -2758,7 +2742,7 @@ def RunMonkeyPlug():
                     else:
                         mmguero.eprint(f'Warning: AUTO mode could not find a validated instrumental file')
                         mmguero.eprint(f'All top candidates failed two-way validation (likely belong to other songs)')
-                        mmguero.eprint(f'Falling back to mute mode')
+                        mmguero.eprint(f'No instrumental file found, will use AI generation')
         else:
             # Pattern-based search with specified prefix
             # Common patterns to search for
@@ -2793,7 +2777,7 @@ def RunMonkeyPlug():
                     auto_generate = True
                     mmguero.eprint(f'Auto mode: No instrumental found, will use AI to generate instrumental')
                 else:
-                    mmguero.eprint(f'You can specify the full path with --instrumental instead')
+                    mmguero.eprint(f'Will use AI to generate instrumental instead')
 
     # Single file mode: check if we should enable auto_generate after search
     # If auto mode was requested and no file was found, enable generation

@@ -80,7 +80,7 @@ monkeyplug -i song.mp3 -o song_clean.mp3 -m whisper
 
 Three modes are available. Priority order: `--mute` > `--beep` > `--instrumental`.
 
-### Mute (default)
+### Mute
 
 Silences profanity sections with short fade transitions.
 
@@ -150,12 +150,6 @@ The AI separation process:
 4. Splices the AI-generated instrumental back into the original
 
 Separation models are cached at `~/.cache/monkeyplug/separation_models/` (downloaded on first use).
-
-#### Disable instrumental mode
-
-```bash
-monkeyplug -i song.mp3 -o song_clean.mp3 --instrumental-prefix NONE
-```
 
 ## Wildcard / Batch Mode
 
