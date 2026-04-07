@@ -2,337 +2,338 @@
 
 [![Latest Version](https://img.shields.io/pypi/v/monkeyplug)](https://pypi.python.org/pypi/monkeyplug/) [![VOSK Docker Images](https://github.com/mmguero/monkeyplug/workflows/monkeyplug-build-push-vosk-ghcr/badge.svg)](https://github.com/mmguero/monkeyplug/pkgs/container/monkeyplug) [![Whisper Docker Images](https://github.com/mmguero/monkeyplug/workflows/monkeyplug-build-push-whisper-ghcr/badge.svg)](https://github.com/mmguero/monkeyplug/pkgs/container/monkeyplug)
 
-**monkeyplug** is a little script to censor profanity in audio files (intended for podcasts, but YMMV) in a few simple steps:
+**monkeyplug** censors profanity in audio files using speech recognition. It detects profanity timestamps and either mutes, beeps, or splices in instrumental audio using FFmpeg.
 
-1. The user provides a local audio file (or a URL pointing to an audio file which is downloaded)
-2. Either [Groq Whisper API](https://groq.com), [Whisper](https://openai.com/research/whisper) ([GitHub](https://github.com/openai/whisper)) or the [Vosk](https://alphacephei.com/vosk/)-[API](https://github.com/alphacep/vosk-api) is used to recognize speech in the audio file (or a pre-generated transcript can be loaded)
-3. Each recognized word is checked against a built-in profanity list or a custom [list](./src/monkeyplug/swears.txt) of profanity or other words you'd like muted (supports text or [JSON format](./SWEARS_JSON_FORMAT.md))
-4. [`ffmpeg`](https://www.ffmpeg.org/) is used to create a cleaned audio file, muting or "bleeping" the objectional words, or splicing in instrumental sections for a cleaner edit
-5. Optionally, the transcript can be saved for reuse in future processing runs
+**This is a fork** of [mmguero/monkeyplug](https://github.com/mmguero/monkeyplug) with:
+- **Groq API** integration (fast, default mode)
+- **AI instrumental generation** via sherpa-onnx source separation
+- **Wildcard/batch processing** with automatic vocal detection
+- **Transcript save/reuse** for faster reprocessing
+- **Config file** support with sensible defaults
 
-You can then use your favorite media player to play the cleaned audio file.
+## How It Works
 
-If provided a video file for input, **monkeyplug** will attempt to process the audio stream from the file and remultiplex it, copying the original video stream.
+1. Speech recognition produces word-level timestamps (using Groq, Whisper, or Vosk)
+2. Each word is checked against a built-in profanity list (or your custom list)
+3. FFmpeg creates a cleaned audio file by either muting, beeping, or replacing profanity sections with instrumental audio
+4. Optionally, transcripts can be saved and reused to skip transcription on future runs
 
-**monkeyplug** is part of a family of projects with similar goals:
-
-* 📼 [cleanvid](https://github.com/mmguero/cleanvid) for video files (using [SRT-formatted](https://en.wikipedia.org/wiki/SubRip#Format) subtitles)
-* 🎤 [monkeyplug](https://github.com/mmguero/monkeyplug) for audio and video files (using [Groq API](https://groq.com), [Whisper](https://openai.com/research/whisper), or the [Vosk](https://alphacephei.com/vosk/)-[API](https://github.com/alphacep/vosk-api) for speech recognition)
-* 📕 [montag](https://github.com/mmguero/montag) for ebooks
+If provided a video file, monkeyplug processes the audio stream and remultiplexes it with the original video stream.
 
 ## Installation
 
-Using `pip`, to install the latest [release from PyPI](https://pypi.org/project/monkeyplug/):
-
-```
-python3 -m pip install -U monkeyplug
+```bash
+pip install monkeyplug
 ```
 
-Or to install directly from GitHub:
-
-
-```
-python3 -m pip install -U 'git+https://github.com/mmguero/monkeyplug'
-```
-
-## Prerequisites
-
-[monkeyplug](./src/monkeyplug/monkeyplug.py) requires:
-
-* [FFmpeg](https://www.ffmpeg.org)
-* Python 3
-    - [mutagen](https://github.com/quodlibet/mutagen)
-    - [groq](https://console.groq.com/) (for Groq API mode - default)
-    - Optional speech recognition libraries:
-        + [Whisper](https://github.com/openai/whisper)
-        + [vosk-api](https://github.com/alphacep/vosk-api) with a VOSK [compatible model](https://alphacephei.com/vosk/models)
-
-To install FFmpeg, use your operating system's package manager or install binaries from [ffmpeg.org](https://www.ffmpeg.org/download.html). The Python dependencies will be installed automatically if you are using `pip` to install monkeyplug, except for [`vosk`](https://pypi.org/project/vosk/) or [`openai-whisper`](https://pypi.org/project/openai-whisper/); as monkeyplug can work with multiple speech recognition engines, there is not a hard installation requirement for any specific one until runtime.
-
-### Groq API Setup
-
-The default mode uses Groq's fast Whisper API. To get started:
-
-1. Sign up at [console.groq.com](https://console.groq.com)
-2. Generate an API key from the API Keys section
-3. Configure your API key using one of these methods (in order of priority):
-
-   **Method 1: Environment variable (recommended for production)**
-   ```bash
-   export GROQ_API_KEY=gsk_...
-   monkeyplug -i input.mp3 -o output.mp3
-   ```
-
-   **Method 2: Command-line parameter**
-   ```bash
-   monkeyplug -i input.mp3 -o output.mp3 --groq-api-key gsk_...
-   ```
-
-   **Method 3: Config file**
-   ```bash
-   mkdir -p ~/.groq
-   echo '{"api_key": "gsk_..."}' > ~/.groq/config.json
-   ```
-
-   **Method 4: Project-local file**
-   ```bash
-   echo 'gsk_...' > .groq_key
-   # Add .groq_key to .gitignore to keep it private
-   ```
-
-## usage
-
-```
-usage: monkeyplug <arguments>
-
-options:
-  -h, --help            show this help message and exit
-  -v [true|false], --verbose [true|false]
-                        Verbose/debug output
-  -m <string>, --mode <string>
-                        Speech recognition engine (groq|whisper|vosk) (default: groq)
-  -i <string>, --input <string>
-                        Input file (or URL)
-  -o <string>, --output <string>
-                        Output file
-  -w <profanity file>, --swears <profanity file>
-                        text or JSON file containing profanity (default: built-in list)
-  --output-json <string>
-                        Output file to store transcript JSON
-  --input-transcript <string>
-                        Load existing transcript JSON instead of performing speech recognition
-  --save-transcript     Automatically save transcript JSON alongside output audio file
-  --force-retranscribe  Force new transcription even if transcript file exists (overrides automatic reuse)
-  --instrumental <string>
-                        Instrumental version of the audio file for splicing profanity sections
-  --instrumental-prefix <string>
-                        Prefix/suffix to search for instrumental file, or 'AUTO' for fuzzy matching (e.g., 'instrumental' finds 'song_instrumental.mp3')
-  -a <str>, --audio-params <str>
-                        Audio parameters for ffmpeg (default depends on output audio codec)
-  -c <int>, --channels <int>
-                        Audio output channels (default: 2)
-  -s <int>, --sample-rate <int>
-                        Audio output sample rate (default: 48000)
-  -r <str>, --bitrate <str>
-                        Audio output bitrate (default: 256K)
-  -q <int>, --vorbis-qscale <int>
-                        qscale for libvorbis output (default: 5)
-  -f <string>, --format <string>
-                        Output file format (default: inferred from extension of --output, or "MATCH")
-  --pad-milliseconds <int>
-                        Milliseconds to pad on either side of muted segments (default: 0)
-  --pad-milliseconds-pre <int>
-                        Milliseconds to pad before muted segments (default: 0)
-  --pad-milliseconds-post <int>
-                        Milliseconds to pad after muted segments (default: 0)
-  -b [true|false], --beep [true|false]
-                        Beep instead of silence
-  -z <int>, --beep-hertz <int>
-                        Beep frequency hertz (default: 1000)
-  --beep-mix-normalize [true|false]
-                        Normalize mix of audio and beeps (default: False)
-  --beep-audio-weight <int>
-                        Mix weight for non-beeped audio (default: 1)
-  --beep-sine-weight <int>
-                        Mix weight for beep (default: 1)
-  --beep-dropout-transition <int>
-                        Dropout transition for beep (default: 0)
-  --force [true|false]  Process file despite existence of embedded tag
-
-Groq Options:
-  --groq-api-key <string>
-                        Groq API key (default: GROQ_API_KEY env var, ~/.groq/config.json, or ./.groq_key)
-  --groq-model <string>
-                        Groq Whisper model (default: whisper-large-v3)
-
-VOSK Options:
-  --vosk-model-dir <string>
-                        VOSK model directory (default: ~/.cache/vosk)
-  --vosk-read-frames-chunk <int>
-                        WAV frame chunk (default: 8000)
-
-Whisper Options:
-  --whisper-model-dir <string>
-                        Whisper model directory (~/.cache/whisper)
-  --whisper-model-name <string>
-                        Whisper model name (base.en)
-  --torch-threads <int>
-                        Number of threads used by torch for CPU inference (0)
-
-```
-
-### Docker
-
-Alternately, a [Dockerfile](./docker/Dockerfile) is provided to allow you to run monkeyplug in Docker. You can pull one of the following images:
-
-* [VOSK](https://alphacephei.com/vosk/models)
-    - oci.guero.org/monkeyplug:vosk-small
-    - oci.guero.org/monkeyplug:vosk-large
-* [Whisper](https://github.com/openai/whisper?tab=readme-ov-file#available-models-and-languages)
-    - oci.guero.org/monkeyplug:whisper-tiny.en
-    - oci.guero.org/monkeyplug:whisper-tiny
-    - oci.guero.org/monkeyplug:whisper-base.en
-    - oci.guero.org/monkeyplug:whisper-base
-    - oci.guero.org/monkeyplug:whisper-small.en
-    - oci.guero.org/monkeyplug:whisper-small
-    - oci.guero.org/monkeyplug:whisper-medium.en
-    - oci.guero.org/monkeyplug:whisper-medium
-    - oci.guero.org/monkeyplug:whisper-large-v1
-    - oci.guero.org/monkeyplug:whisper-large-v2
-    - oci.guero.org/monkeyplug:whisper-large-v3
-    - oci.guero.org/monkeyplug:whisper-large
-
-then run [`monkeyplug-docker.sh`](./docker/monkeyplug-docker.sh) inside the directory where your audio files are located.
-
-## Transcript Workflow
-
-**monkeyplug** supports saving and reusing transcripts to improve workflow efficiency:
-
-### Save Transcript for Later Reuse
+Or install from GitHub:
 
 ```bash
-# Generate transcript once and save it
-monkeyplug -i input.mp3 -o output.mp3 --save-transcript
-
-# This creates output.mp3 and output_transcript.json
+pip install 'git+https://github.com/mmguero/monkeyplug'
 ```
 
-### Automatic Transcript Reuse
+### Prerequisites
 
+- **FFmpeg** — install via your OS package manager or from [ffmpeg.org](https://www.ffmpeg.org/download.html)
+- **Python 3.6+**
+- **Groq API key** (for default mode) — see [Groq API Setup](#groq-api-setup)
+- Optional: [Whisper](https://github.com/openai/whisper) or [Vosk](https://github.com/alphacep/vosk-api) for offline recognition
+
+## Groq API Setup
+
+The default mode uses Groq's fast Whisper API. Configure your API key using one of these methods (in order of priority):
+
+**Command-line parameter:**
 ```bash
-# Second run: Automatically detects and reuses transcript (22x faster!)
-monkeyplug -i input.mp3 -o output.mp3 --save-transcript
-# Finds output_transcript.json and reuses it automatically
-
-# Force new transcription when needed
-monkeyplug -i input.mp3 -o output.mp3 --save-transcript --force-retranscribe
+monkeyplug -i input.mp3 -o output.mp3 --groq-api-key gsk_...
 ```
 
-### Manual Transcript Loading
-
+**Environment variable:**
 ```bash
-# Explicitly specify transcript to load
-monkeyplug -i input.mp3 -o output_strict.mp3 --input-transcript output_transcript.json -w strict_swears.txt
+export GROQ_API_KEY=gsk_...
 ```
 
-## Usage Examples
+**Config file** (`~/.groq/config.json`):
+```json
+{"api_key": "gsk_..."}
+```
 
-### Basic Usage with Built-in Profanity List
+**Project-local file** (add `.groq_key` to `.gitignore`):
+```bash
+echo 'gsk_...' > .groq_key
+```
+
+## Quick Start
 
 ```bash
-# Uses built-in profanity list and Groq API (default)
+# Basic usage — mutes profanity using Groq API and built-in word list
+monkeyplug -i song.mp3 -o song_clean.mp3
+
+# Verbose output to see what's happening
+monkeyplug -i song.mp3 -o song_clean.mp3 -v
+
+# Use local Whisper instead of Groq
+monkeyplug -i song.mp3 -o song_clean.mp3 -m whisper
+```
+
+## Censorship Modes
+
+Three modes are available. Priority order: `--mute` > `--beep` > `--instrumental`.
+
+### Mute (default)
+
+Silences profanity sections with short fade transitions.
+
+```bash
+monkeyplug -i song.mp3 -o song_clean.mp3 --mute
+```
+
+### Beep
+
+Replaces profanity with a beep tone.
+
+```bash
+# Basic beep
+monkeyplug -i song.mp3 -o song_clean.mp3 -b
+
+# Customize beep frequency and mix
+monkeyplug -i song.mp3 -o song_clean.mp3 -b -z 1000 --beep-mix-normalize
+```
+
+### Instrumental
+
+Replaces profanity sections with instrumental audio for a professional-sounding clean edit. Supports several sub-modes:
+
+#### Provide an instrumental file directly
+
+```bash
+monkeyplug -i explicit.mp3 -o clean.mp3 --instrumental instrumental.mp3
+```
+
+#### Auto mode (default)
+
+Searches for an instrumental file using fuzzy matching. If not found, falls back to AI generation.
+
+```bash
+# Default behavior — searches for matching instrumental, generates if not found
+monkeyplug -i song.mp3 -o song_clean.mp3 --instrumental auto
+
+# This is also the default when no --instrumental flag is given
 monkeyplug -i song.mp3 -o song_clean.mp3
 ```
 
-### Instrumental Mode - Professional Clean Edit
+AUTO fuzzy matching searches the same directory for audio files with similar names (30% similarity threshold). Examples:
+- `1-satisfied.mp3` → finds `satisfied-inst.mp3`
+- `MySong_v2.mp3` → finds `MySong_instrumental.mp3`
+
+#### Prefix search
+
+Searches for instrumental files using a specific prefix/suffix pattern:
 
 ```bash
-# Create radio edit by splicing instrumental sections
-# This produces a clean version that maintains the music flow
-monkeyplug -i explicit_song.mp3 \
-           -o clean_song.mp3 \
-           --instrumental instrumental_song.mp3 \
-           --save-transcript
-
-# The output will have profanity sections replaced with the instrumental
-# Multiple consecutive profanities within 100ms are merged into one splice
+# Searches for: song_inst.mp3, song-inst.mp3, inst_song.mp3, etc.
+monkeyplug -i song.mp3 -o song_clean.mp3 --instrumental prefix --instrumental-prefix inst
 ```
 
-### Instrumental Mode - Auto-Search with Prefix
+#### AI Generation (force)
+
+Uses sherpa-onnx to AI-generate instrumental sections for profanity segments. Skips all instrumental file searching.
 
 ```bash
-# Automatically find instrumental file by prefix/suffix
-# Searches for patterns like:
-#   - song_instrumental.mp3
-#   - song-instrumental.mp3
-#   - instrumental_song.mp3
-#   - instrumental-song.mp3
-monkeyplug -i song.mp3 -o song_clean.mp3 --instrumental-prefix instrumental
-
-# With your file naming convention:
-# If you have: "MyTrack.mp3" and "MyTrack_instrumental.mp3"
-monkeyplug -i MyTrack.mp3 -o MyTrack_clean.mp3 --instrumental-prefix instrumental
-
-# Or if you have: "MyTrack.mp3" and "inst_MyTrack.mp3"
-monkeyplug -i MyTrack.mp3 -o MyTrack_clean.mp3 --instrumental-prefix inst
+monkeyplug -i song.mp3 -o song_clean.mp3 --instrumental generate
 ```
 
-### Instrumental Mode - AUTO Fuzzy Matching
+The AI separation process:
+1. Extracts profanity segments from the original audio
+2. Concatenates them with configurable padding (default: 1.0s)
+3. Separates vocals from instrumental using a Spleeter model
+4. Splices the AI-generated instrumental back into the original
+
+Separation models are cached at `~/.cache/monkeyplug/separation_models/` (downloaded on first use).
+
+#### Disable instrumental mode
 
 ```bash
-# AUTO mode - automatically finds the best matching instrumental file
-# Uses fuzzy string matching to find similar filenames in the same directory
-# Great when you have inconsistent naming conventions
-
-# Example: Given "1-satisfied.mp3", it will find "satisfied-inst.mp3"
-monkeyplug -i 1-satisfied.mp3 -o 1-satisfied_clean.mp3 --instrumental-prefix AUTO
-
-# More examples:
-# Input: "MySong_v2.mp3" → Auto-finds: "MySong_instrumental.mp3"
-# Input: "Track_Final.mp3" → Auto-finds: "Track_Inst.mp3"
-# Input: "song.mp3" → Auto-finds: "song instrumental.wav"
-
-# AUTO mode searches the same directory and finds the closest match by name similarity
-# Requires at least 30% similarity to avoid false matches
-# Use -v to see similarity scores for all candidates
-monkeyplug -i song.mp3 -o song_clean.mp3 --instrumental-prefix AUTO -v
+monkeyplug -i song.mp3 -o song_clean.mp3 --instrumental-prefix NONE
 ```
 
-### Custom Profanity Lists
+## Wildcard / Batch Mode
+
+Process multiple files at once using `*` wildcards:
 
 ```bash
-# Use custom text file (pipe-delimited: word|replacement)
+# Process all MP3s in current directory
+monkeyplug -i "*.mp3" -o "*_clean.mp3" --instrumental generate
+
+# With verbose output
+monkeyplug -i "*.mp3" -o "*_clean.mp3 -v
+```
+
+### Vocal detection
+
+In wildcard mode, monkeyplug automatically detects which files have vocals by transcribing a 10-second sample from the middle of each file. Instrumental files (no speech detected) are skipped.
+
+With `--instrumental generate`, vocal detection is **skipped by default** (all files are processed) since you're generating instrumentals anyway. Use `--filter-instrumentals` to re-enable it:
+
+```bash
+# Process all files (default — no vocal detection)
+monkeyplug -i "*.mp3" -o "*_clean.mp3" --instrumental generate
+
+# Skip files detected as instrumentals
+monkeyplug -i "*.mp3" -o "*_clean.mp3" --instrumental generate --filter-instrumentals
+```
+
+Files matching the output pattern are automatically skipped (already processed).
+
+## Transcript Workflow
+
+Save and reuse transcripts to avoid redundant API calls (up to 22x faster on repeat runs):
+
+```bash
+# Generate and save transcript alongside output
+monkeyplug -i song.mp3 -o song_clean.mp3 --save-transcript
+# Creates: song_clean.mp3 + song_clean_transcript.json
+
+# Second run: automatically finds and reuses the transcript
+monkeyplug -i song.mp3 -o song_clean.mp3 --save-transcript
+
+# Force new transcription (ignore existing transcript)
+monkeyplug -i song.mp3 -o song_clean.mp3 --save-transcript --force-retranscribe
+
+# Manually specify a transcript to load
+monkeyplug -i song.mp3 -o song_clean_strict.mp3 --input-transcript song_clean_transcript.json -w strict_swears.txt
+```
+
+## Custom Profanity Lists
+
+```bash
+# Use a custom text file (one word per line, or word|replacement)
 monkeyplug -i podcast.mp3 -o podcast_clean.mp3 -w custom_swears.txt
 
-# Use custom JSON file
+# Use a custom JSON file (array of strings)
 monkeyplug -i podcast.mp3 -o podcast_clean.mp3 -w custom_swears.json
 
-# Combine built-in list with custom additions
-# Custom words are merged with built-in profanity list
-monkeyplug -i podcast.mp3 -o podcast_clean.mp3 -w additional_words.json
+# Custom words are merged with the built-in profanity list
 ```
 
-### Speech Recognition Mode Selection
+## Config File
 
-```bash
-# Use Groq API (default, fastest)
-monkeyplug -i audio.mp3 -o clean.mp3
+monkeyplug looks for a JSON config file in this order (first found wins):
 
-# Use local Whisper model
-monkeyplug -i audio.mp3 -o clean.mp3 -m whisper
+1. `./.monkeyplug.json` (current directory — project-specific)
+2. `~/.cache/monkeyplug/config.json` (user-specific)
 
-# Use Vosk API
-monkeyplug -i audio.mp3 -o clean.mp3 -m vosk
+If neither exists, a default config is auto-created at `~/.cache/monkeyplug/config.json`:
+
+```json
+{
+  "pad_milliseconds": 10,
+  "pad_milliseconds_pre": 10,
+  "pad_milliseconds_post": 10,
+  "separation_padding": 1.0,
+  "beep_hertz": 1000
+}
 ```
 
-### Padding and Timing Control
+Config values provide defaults that can be overridden by CLI arguments.
+
+Clean all caches (models, config) with:
 
 ```bash
-# Add padding around profanity for smoother transitions
+monkeyplug --clean-cache
+```
+
+## Padding Control
+
+Add padding around profanity for smoother transitions:
+
+```bash
+# Equal padding on both sides
 monkeyplug -i song.mp3 -o clean.mp3 --pad-milliseconds 100
 
 # Different pre and post padding
 monkeyplug -i song.mp3 -o clean.mp3 --pad-milliseconds-pre 50 --pad-milliseconds-post 100
 ```
 
-### Beep Mode
+## Full Usage Reference
 
-```bash
-# Use beep instead of silence
-monkeyplug -i audio.mp3 -o clean.mp3 -b
-
-# Customize beep frequency and mix
-monkeyplug -i audio.mp3 -o clean.mp3 -b -z 1000 --beep-mix-normalize
 ```
+usage: monkeyplug <arguments>
+
+Core Options:
+  -i, --input <string>              Input file, URL, or wildcard pattern
+  -o, --output <string>             Output file or pattern
+  -v [concise|full], --verbose      Verbose output
+  -m [groq|whisper|vosk], --mode    Speech recognition engine (default: groq)
+
+Censorship Modes:
+  --mute                            Mute profanity (disables instrumental mode)
+  -b, --beep                        Beep instead of silence
+  --instrumental <mode|file>        Instrumental mode: auto, generate, prefix, or file path
+  --instrumental-prefix <string>    Prefix to search for instrumental file (default: AUTO)
+  --instrumental-auto-candidates <int>  Top candidates for AUTO matching (default: 5)
+
+Profanity:
+  -w, --swears <file>               Custom profanity list (text or JSON)
+  --pad-milliseconds <int>          Padding around profanity (default: 10)
+  --pad-milliseconds-pre <int>      Padding before profanity (default: 10)
+  --pad-milliseconds-post <int>     Padding after profanity (default: 10)
+
+Beep Options:
+  -z, --beep-hertz <int>            Beep frequency in Hz (default: 1000)
+  --beep-mix-normalize              Normalize audio/beep mix
+  --beep-audio-weight <int>         Non-beeped audio weight (default: 1)
+  --beep-sine-weight <int>          Beep weight (default: 1)
+  --beep-dropout-transition <int>   Dropout transition for beep (default: 0)
+
+Transcript:
+  --save-transcript                 Save transcript JSON alongside output
+  --input-transcript <file>         Load existing transcript JSON
+  --output-json <file>              Save transcript to specific file
+  --force-retranscribe              Force new transcription
+
+AI Separation:
+  --separation-padding <seconds>    Context padding for AI generation (default: 1.0)
+  --filter-instrumentals            Filter out instrumental files in wildcard mode with generate
+
+Audio Output:
+  -f, --format <string>             Output format (default: inferred from extension or "MATCH")
+  -c, --channels <int>              Output channels (default: 2)
+  -s, --sample-rate <int>           Output sample rate (default: 48000)
+  -r, --bitrate <string>            Output bitrate (default: 256K)
+  -a, --audio-params <string>       FFmpeg audio parameters
+  -q, --vorbis-qscale <int>         qscale for libvorbis (default: 5)
+
+Other:
+  --force                           Process file even if already tagged
+  --clean-cache                     Delete all cached data (models, config) and exit
+
+Groq Options:
+  --groq-api-key <string>           Groq API key
+  --groq-model <string>             Groq Whisper model (default: whisper-large-v3)
+
+Whisper Options:
+  --whisper-model-dir <string>      Model directory (default: ~/.cache/whisper)
+  --whisper-model-name <string>     Model name (default: small.en)
+  --torch-threads <int>             CPU inference threads (default: 0)
+
+VOSK Options:
+  --vosk-model-dir <string>         Model directory (default: ~/.cache/vosk)
+  --vosk-read-frames-chunk <int>    WAV frame chunk (default: 8000)
+```
+
+## Docker
+
+Docker images are available for running monkeyplug in containers. See [mmguero/monkeyplug](https://github.com/mmguero/monkeyplug) for available images.
 
 ## Contributing
 
-If you'd like to help improve monkeyplug, pull requests will be welcomed!
+Pull requests welcome!
 
 ## Authors
 
-* **Seth Grover** - *Initial work* - [mmguero](https://github.com/mmguero)
+- **Seth Grover** - Initial work - [mmguero](https://github.com/mmguero)
 
 ## License
 
-This project is licensed under the BSD 3-Clause License - see the [LICENSE](LICENSE) file for details.
+BSD 3-Clause License — see the [LICENSE](LICENSE) file for details.
