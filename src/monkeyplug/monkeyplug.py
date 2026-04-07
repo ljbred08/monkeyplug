@@ -1892,20 +1892,35 @@ def expand_and_detect_vocals(input_pattern, output_pattern, args):
 
 ###################################################################################################
 # Config file loading
+MONKEYPLUG_CACHE_DIR = os.path.join(os.path.expanduser('~'), '.cache', 'monkeyplug')
+MONKEYPLUG_CONFIG_PATH = os.path.join(MONKEYPLUG_CACHE_DIR, 'config.json')
+
+DEFAULT_CONFIG = {
+    "pad_milliseconds": 10,
+    "pad_milliseconds_pre": 10,
+    "pad_milliseconds_post": 10,
+    "separation_padding": 1.0,
+    "beep_hertz": BEEP_HERTZ_DEFAULT,
+}
+
+
 def load_config_settings(debug=False):
     """
     Load settings from JSON config file.
 
     Config file search order (first found wins):
     1. ./.monkeyplug.json (current directory, project-specific)
-    2. ~/.monkeyplug/config.json (user-specific)
+    2. ~/.cache/monkeyplug/config.json (user-specific, alongside models)
+
+    If no config exists anywhere, a default one is created at
+    ~/.cache/monkeyplug/config.json so the user can find and edit it.
 
     Returns:
         dict: Config settings (empty dict if no config found)
     """
     config_paths = [
         os.path.join(os.getcwd(), '.monkeyplug.json'),
-        os.path.join(os.path.expanduser('~'), '.monkeyplug', 'config.json'),
+        MONKEYPLUG_CONFIG_PATH,
     ]
 
     for config_path in config_paths:
@@ -1923,10 +1938,19 @@ def load_config_settings(debug=False):
                     mmguero.eprint(f"Warning: Failed to load config from {config_path}: {e}")
                 continue
 
-    if debug:
-        mmguero.eprint("No config file found, using defaults")
+    # No config found anywhere — create a default one so the user can edit it
+    try:
+        os.makedirs(MONKEYPLUG_CACHE_DIR, exist_ok=True)
+        with open(MONKEYPLUG_CONFIG_PATH, 'w') as f:
+            json.dump(DEFAULT_CONFIG, f, indent=2)
+            f.write('\n')
+        if debug:
+            mmguero.eprint(f"Created default config at: {MONKEYPLUG_CONFIG_PATH}")
+    except (IOError, OSError) as e:
+        if debug:
+            mmguero.eprint(f"Warning: Could not create default config: {e}")
 
-    return {}
+    return dict(DEFAULT_CONFIG)
 
 
 ###################################################################################################
@@ -2212,6 +2236,14 @@ def RunMonkeyPlug():
         help="Process file despite existence of embedded tag",
     )
 
+    parser.add_argument(
+        "--clean-cache",
+        dest="cleanCache",
+        action="store_true",
+        default=False,
+        help=f"Delete all cached data (models, config) at {MONKEYPLUG_CACHE_DIR} and exit",
+    )
+
     voskArgGroup = parser.add_argument_group('VOSK Options')
     voskArgGroup.add_argument(
         "--vosk-model-dir",
@@ -2280,6 +2312,16 @@ def RunMonkeyPlug():
     except SystemExit as se:
         mmguero.eprint(se)
         exit(2)
+
+    # Handle --clean-cache early and exit
+    if args.cleanCache:
+        import shutil
+        if os.path.isdir(MONKEYPLUG_CACHE_DIR):
+            shutil.rmtree(MONKEYPLUG_CACHE_DIR)
+            print(f"Deleted cache directory: {MONKEYPLUG_CACHE_DIR}")
+        else:
+            print(f"No cache directory found at: {MONKEYPLUG_CACHE_DIR}")
+        return
 
     # Set debug flag based on verbose level for backward compatibility
     if args.verbose == "full":
