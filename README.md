@@ -1,6 +1,6 @@
 # monkeyplug-enhanced
 
-[![Latest Version](https://img.shields.io/pypi/v/monkeyplug-enhanced)](https://pypi.python.org/pypi/monkeyplug-enhanced/) [![VOSK Docker Images](https://github.com/mmguero/monkeyplug/workflows/monkeyplug-build-push-vosk-ghcr/badge.svg)](https://github.com/mmguero/monkeyplug/pkgs/container/monkeyplug) [![Whisper Docker Images](https://github.com/mmguero/monkeyplug/workflows/monkeyplug-build-push-whisper-ghcr/badge.svg)](https://github.com/mmguero/monkeyplug/pkgs/container/monkeyplug)
+[![Latest Version](https://img.shields.io/pypi/v/monkeyplug-enhanced)](https://pypi.python.org/pypi/monkeyplug-enhanced/)
 
 **monkeyplug-enhanced** is an enhanced fork of [mmguero/monkeyplug](https://github.com/mmguero/monkeyplug) (available on PyPI as `monkeyplug`). It censors profanity in audio files using speech recognition, detecting profanity timestamps and either muting, beeping, or splicing in instrumental audio using FFmpeg.
 
@@ -318,10 +318,6 @@ VOSK Options:
   --vosk-model-dir <string>         Model directory (default: ~/.cache/vosk)
   --vosk-read-frames-chunk <int>    WAV frame chunk (default: 8000)
 ```
-
-## Docker
-
-Docker images are available for running monkeyplug in containers. See [mmguero/monkeyplug](https://github.com/mmguero/monkeyplug) for available images.
 
 ## Contributing
 
