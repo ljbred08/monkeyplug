@@ -84,7 +84,16 @@ When `--instrumental auto` or `--instrumental generate` is used:
 
 ### Config System
 
-Search order (first found wins): `./.monkeyplug.json` (CWD) → `~/.cache/monkeyplug/config.json`. If neither exists, a default config is auto-created at the latter path. Config provides defaults for padding and beep settings, overridable by CLI args. Clean all caches: `monkeyplug --clean-cache`.
+Search order (first found wins): `./.monkeyplug.json` (CWD) → `~/.cache/monkeyplug/config.json`. If neither exists, a default config is auto-created at the latter path. Config provides defaults for padding, beep, and display settings, overridable by CLI args. Clean all caches: `monkeyplug --clean-cache`.
+
+### Show Words (-w / --show-words)
+
+Controls profanity detection output in normal mode (non-verbose). Three modes:
+- **`full`**: Print each detected word with timestamp (`"word" (M:SS.mmm - M:SS.mmm)`) + count
+- **`clean`** (default): Print only the count (e.g., "3 words detected" or "No profanity detected")
+- **`none`**: Silent — no profanity output at all
+
+Default is settable via `show_words` key in config file. CLI `-w full|clean|none` overrides config default. Output goes to stderr via `mmguero.eprint()`. Called from `EncodeCleanAudio()` after `CreateCleanMuteList()` populates `naughtyWordList`.
 
 ### Timing Log
 

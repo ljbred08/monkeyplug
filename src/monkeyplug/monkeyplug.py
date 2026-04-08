@@ -343,6 +343,7 @@ class Plugger(object):
         force=False,
         dbug=False,
         instrumentalFileSpec=None,
+        showWords="clean",
     ):
         self.padSecPre = padMsecPre / 1000.0
         self.padSecPost = padMsecPost / 1000.0
@@ -357,6 +358,7 @@ class Plugger(object):
         self.outputJson = outputJson
         self.inputTranscript = inputTranscript
         self.saveTranscript = saveTranscript
+        self.showWords = showWords
 
         # determine input file name, or download and save file
         if (iFileSpec is not None) and os.path.isfile(iFileSpec):
@@ -907,6 +909,34 @@ class Plugger(object):
 
         return self.muteTimeList
 
+    def _fmt_time(self, seconds):
+        """Format seconds as M:SS.mmm"""
+        mins = int(seconds) // 60
+        secs = seconds - mins * 60
+        return f"{mins}:{secs:06.3f}"
+
+    def _print_words_summary(self):
+        """Print profanity detection summary based on showWords mode."""
+        if self.showWords == "none":
+            return
+
+        if not self.naughtyWordList:
+            mmguero.eprint("No profanity detected")
+            return
+
+        count = len(self.naughtyWordList)
+        if self.showWords == "clean":
+            word = "word" if count == 1 else "words"
+            mmguero.eprint(f"{count} {word} detected")
+        elif self.showWords == "full":
+            mmguero.eprint("Profanity detected:")
+            for w in self.naughtyWordList:
+                start = w.get('start', 0)
+                end = w.get('end', 0)
+                mmguero.eprint(f'  - "{w["word"]}" ({self._fmt_time(start)} - {self._fmt_time(end)})')
+            word = "word" if count == 1 else "words"
+            mmguero.eprint(f"{count} {word} detected")
+
     def _build_instrumental_filters(self):
         """Build FFmpeg filter complex for instrumental splicing
 
@@ -1245,6 +1275,9 @@ class Plugger(object):
             if hasattr(self, attr):
                 delattr(self, attr)
 
+        # Print profanity detection summary (after progress bar is closed)
+        self._print_words_summary()
+
         return self.outputFileSpec
 
 
@@ -1285,6 +1318,7 @@ class VoskPlugger(Plugger):
         beepDropTransition=BEEP_DROPOUT_TRANSITION_DEFAULT,
         force=False,
         dbug=False,
+        showWords="clean",
     ):
         self.wavReadFramesChunk = wChunk
         self.modelPath = None
@@ -1332,6 +1366,7 @@ class VoskPlugger(Plugger):
             beepDropTransition=beepDropTransition,
             force=force,
             dbug=dbug,
+            showWords=showWords,
         )
 
         self.tmpWavFileSpec = self.inputFileParts[0] + ".wav"
@@ -1468,6 +1503,7 @@ class WhisperPlugger(Plugger):
         beepDropTransition=BEEP_DROPOUT_TRANSITION_DEFAULT,
         force=False,
         dbug=False,
+        showWords="clean",
     ):
         self.whisper = None
         self.model = None
@@ -1512,6 +1548,7 @@ class WhisperPlugger(Plugger):
             beepDropTransition=beepDropTransition,
             force=force,
             dbug=dbug,
+            showWords=showWords,
         )
 
         if self.debug:
@@ -1597,6 +1634,7 @@ class GroqPlugger(Plugger):
         verbose_level="",
         auto_generate=False,
         separation_padding=1.0,
+        showWords="clean",
     ):
         # Import groq_config - handle both relative and absolute imports
         try:
@@ -1640,6 +1678,7 @@ class GroqPlugger(Plugger):
             force=force,
             dbug=dbug,
             instrumentalFileSpec=instrumentalFileSpec,
+            showWords=showWords,
         )
 
         # Initialize auto-separation mode
@@ -2170,6 +2209,7 @@ DEFAULT_CONFIG = {
     "pad_milliseconds_post": 10,
     "separation_padding": 1.0,
     "beep_hertz": BEEP_HERTZ_DEFAULT,
+    "show_words": "clean",
 }
 
 
@@ -2355,6 +2395,14 @@ def RunMonkeyPlug():
     )
     parser.add_argument(
         "-w",
+        "--show-words",
+        dest="showWords",
+        type=str,
+        choices=["full", "clean", "none"],
+        default=config.get("show_words", "clean"),
+        help="Show detected profanity: full (list with timestamps), clean (count only), none (default: clean)",
+    )
+    parser.add_argument(
         "--swears",
         help=f"text file containing profanity (default: \"{SWEARS_FILENAME_DEFAULT}\")",
         default=os.path.join(script_path, SWEARS_FILENAME_DEFAULT),
@@ -2938,6 +2986,7 @@ def RunMonkeyPlug():
                 verbose_level=args_copy.verbose_level if hasattr(args_copy, 'verbose_level') else "",
                 auto_generate=file_auto_generate,
                 separation_padding=args_copy.separationPadding,
+                showWords=args_copy.showWords,
             )
 
             print(plug.EncodeCleanAudio())
@@ -3144,6 +3193,7 @@ def RunMonkeyPlug():
             beepDropTransition=args.beepDropTransition,
             force=args.forceDespiteTag,
             dbug=args.debug,
+            showWords=args.showWords,
         )
 
     elif args.speechRecMode == SPEECH_REC_MODE_WHISPER:
@@ -3175,6 +3225,7 @@ def RunMonkeyPlug():
             beepDropTransition=args.beepDropTransition,
             force=args.forceDespiteTag,
             dbug=args.debug,
+            showWords=args.showWords,
         )
 
     elif args.speechRecMode == SPEECH_REC_MODE_GROQ:
@@ -3208,6 +3259,7 @@ def RunMonkeyPlug():
             verbose_level=args.verbose_level if hasattr(args, 'verbose_level') else "",
             auto_generate=auto_generate,
             separation_padding=args.separationPadding,
+            showWords=args.showWords,
         )
     else:
         raise ValueError(f"Unsupported speech recognition engine {args.speechRecMode}")
