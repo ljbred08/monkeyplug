@@ -87,6 +87,36 @@ DEFAULT_WHISPER_MODEL_DIR = os.getenv(
 DEFAULT_WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "small.en")
 DEFAULT_TORCH_THREADS = 0
 
+AI_DETECT_PROMPT_DEFAULT = (
+    "You are a profanity detection assistant for audio content. "
+    "Given a numbered transcript with timestamps, identify all words that are profane, vulgar, or offensive. "
+    "Return each word's index number, the word itself, and its timestamps. "
+    "Consider context — some words are profane in one context but not another."
+)
+
+AI_DETECT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reasoning": {"type": "string", "description": "Brief explanation of detection decisions"},
+        "profane_words": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer", "description": "Word index in transcript"},
+                    "word": {"type": "string"},
+                    "start": {"type": "number"},
+                    "end": {"type": "number"}
+                },
+                "required": ["index", "word", "start", "end"],
+                "additionalProperties": False
+            }
+        }
+    },
+    "required": ["reasoning", "profane_words"],
+    "additionalProperties": False
+}
+
 ###################################################################################################
 # Determine script_path and script_name in a way that works both as module and direct execution
 try:
@@ -344,21 +374,29 @@ class Plugger(object):
         dbug=False,
         instrumentalFileSpec=None,
         showWords="clean",
+        detectMode="list",
+        groqApiKey=None,
+        aiDetectModel="openai/gpt-oss-20b",
+        aiDetectPrompt=AI_DETECT_PROMPT_DEFAULT,
     ):
-        self.padSecPre = padMsecPre / 1000.0
-        self.padSecPost = padMsecPost / 1000.0
+        self.debug = dbug
+        self.outputJson = outputJson
+        self.inputTranscript = inputTranscript
+        self.saveTranscript = saveTranscript
+        self.forceDespiteTag = force
         self.beep = beep
         self.beepHertz = beepHertz
         self.beepMixNormalize = beepMixNormalize
         self.beepAudioWeight = beepAudioWeight
         self.beepSineWeight = beepSineWeight
         self.beepDropTransition = beepDropTransition
-        self.forceDespiteTag = force
-        self.debug = dbug
-        self.outputJson = outputJson
-        self.inputTranscript = inputTranscript
-        self.saveTranscript = saveTranscript
+        self.padSecPre = padMsecPre / 1000.0
+        self.padSecPost = padMsecPost / 1000.0
         self.showWords = showWords
+        self.detectMode = detectMode
+        self.groqApiKey = groqApiKey
+        self.aiDetectModel = aiDetectModel
+        self.aiDetectPrompt = aiDetectPrompt
 
         # determine input file name, or download and save file
         if (iFileSpec is not None) and os.path.isfile(iFileSpec):
@@ -757,6 +795,16 @@ class Plugger(object):
 
         self.naughtyWordList = [word for word in self.wordList if word["scrub"] is True]
 
+        # AI-based profanity detection (replaces or supplements list)
+        if self.detectMode in ("ai", "both"):
+            if self.detectMode == "ai":
+                # Reset list-based scrub flags — AI decides everything
+                for word in self.wordList:
+                    word["scrub"] = False
+            self._ai_detect_profanity()
+            # Rebuild naughtyWordList with AI results
+            self.naughtyWordList = [word for word in self.wordList if word["scrub"] is True]
+
         # Handle auto-generation mode
         if hasattr(self, 'autoGenerateMode') and self.autoGenerateMode and len(self.naughtyWordList) > 0:
             # Create merged profanity segments
@@ -936,6 +984,112 @@ class Plugger(object):
                 mmguero.eprint(f'  - "{w["word"]}" ({self._fmt_time(start)} - {self._fmt_time(end)})')
             word = "word" if count == 1 else "words"
             mmguero.eprint(f"{count} {word} detected")
+
+    def _ai_detect_profanity(self):
+        """Use Groq chat API with structured outputs to detect profanity."""
+        import time as _time
+
+        if not self.groqApiKey:
+            raise ValueError("Groq API key required for AI detection")
+        if not self.wordList:
+            return
+
+        # Build numbered transcript text
+        transcript_lines = []
+        for i, w in enumerate(self.wordList):
+            transcript_lines.append(
+                f"[{i}] ({w.get('start', 0):.2f}-{w.get('end', 0):.2f}) {w.get('word', '')}"
+            )
+        transcript_text = "\n".join(transcript_lines)
+
+        # Get model and prompt (set from config via constructor)
+        model = self.aiDetectModel
+        prompt = self.aiDetectPrompt
+
+        # API call with retry logic
+        max_retries = 3
+        retry_delay = 1
+
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.groqApiKey}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": prompt},
+                            {"role": "user", "content": transcript_text},
+                        ],
+                        "response_format": {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "profanity_detection",
+                                "strict": True,
+                                "schema": AI_DETECT_SCHEMA,
+                            }
+                        }
+                    },
+                    timeout=120,
+                )
+
+                if response.status_code == 429:
+                    if attempt < max_retries - 1:
+                        if self.debug:
+                            mmguero.eprint(f"AI detection rate limited, retrying in {retry_delay}s...")
+                        _time.sleep(retry_delay)
+                        retry_delay *= 2
+                        continue
+                    raise Exception("AI detection rate limit exceeded")
+
+                if response.status_code == 401:
+                    raise Exception("Invalid Groq API key for AI detection")
+
+                response.raise_for_status()
+
+                result = response.json()
+                content = result.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+                parsed = json.loads(content)
+
+                profane_words = parsed.get("profane_words", [])
+                for item in profane_words:
+                    idx = item.get("index", -1)
+                    if 0 <= idx < len(self.wordList):
+                        self.wordList[idx]["scrub"] = True
+
+                if self.debug:
+                    mmguero.eprint(f"AI detection raw response: {content}")
+                    reasoning = parsed.get("reasoning", "")
+                    if reasoning:
+                        mmguero.eprint(f"AI reasoning: {reasoning}")
+                    mmguero.eprint(f"AI detection found {len(profane_words)} profane words")
+                    for item in profane_words:
+                        idx = item.get("index", -1)
+                        word = item.get("word", "?")
+                        mmguero.eprint(f"  [{idx}] \"{word}\" ({item.get('start', 0):.2f}-{item.get('end', 0):.2f})")
+
+                return
+
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    if self.debug:
+                        mmguero.eprint(f"AI detection timed out, retrying ({attempt + 1}/{max_retries})...")
+                    _time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    raise Exception("AI detection request timed out")
+
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    if self.debug:
+                        mmguero.eprint(f"AI detection request failed: {e}, retrying ({attempt + 1}/{max_retries})...")
+                    _time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    raise Exception(f"AI detection failed after {max_retries} retries: {e}")
 
     def _build_instrumental_filters(self):
         """Build FFmpeg filter complex for instrumental splicing
@@ -1241,7 +1395,8 @@ class Plugger(object):
             actual_encode = time.time() - encode_start
             if smooth_ticker:
                 smooth_ticker.stop()
-            step_timings['encode'] = (actual_encode, file_duration)
+            if step_timings is not None:
+                step_timings['encode'] = (actual_encode, file_duration)
 
             SetMonkeyplugTag(self.outputFileSpec, debug=self.debug)
 
@@ -1319,6 +1474,10 @@ class VoskPlugger(Plugger):
         force=False,
         dbug=False,
         showWords="clean",
+        detectMode="list",
+        groqApiKey=None,
+        aiDetectModel="openai/gpt-oss-20b",
+        aiDetectPrompt=AI_DETECT_PROMPT_DEFAULT,
     ):
         self.wavReadFramesChunk = wChunk
         self.modelPath = None
@@ -1367,6 +1526,10 @@ class VoskPlugger(Plugger):
             force=force,
             dbug=dbug,
             showWords=showWords,
+            detectMode=detectMode,
+            groqApiKey=groqApiKey,
+            aiDetectModel=aiDetectModel,
+            aiDetectPrompt=aiDetectPrompt,
         )
 
         self.tmpWavFileSpec = self.inputFileParts[0] + ".wav"
@@ -1504,6 +1667,10 @@ class WhisperPlugger(Plugger):
         force=False,
         dbug=False,
         showWords="clean",
+        detectMode="list",
+        groqApiKey=None,
+        aiDetectModel="openai/gpt-oss-20b",
+        aiDetectPrompt=AI_DETECT_PROMPT_DEFAULT,
     ):
         self.whisper = None
         self.model = None
@@ -1549,6 +1716,10 @@ class WhisperPlugger(Plugger):
             force=force,
             dbug=dbug,
             showWords=showWords,
+            detectMode=detectMode,
+            groqApiKey=groqApiKey,
+            aiDetectModel=aiDetectModel,
+            aiDetectPrompt=aiDetectPrompt,
         )
 
         if self.debug:
@@ -1635,6 +1806,10 @@ class GroqPlugger(Plugger):
         auto_generate=False,
         separation_padding=1.0,
         showWords="clean",
+        detectMode="list",
+        groqApiKey=None,
+        aiDetectModel="openai/gpt-oss-20b",
+        aiDetectPrompt=AI_DETECT_PROMPT_DEFAULT,
     ):
         # Import groq_config - handle both relative and absolute imports
         try:
@@ -1679,6 +1854,10 @@ class GroqPlugger(Plugger):
             dbug=dbug,
             instrumentalFileSpec=instrumentalFileSpec,
             showWords=showWords,
+            detectMode=detectMode,
+            groqApiKey=groqApiKey,
+            aiDetectModel=aiDetectModel,
+            aiDetectPrompt=aiDetectPrompt,
         )
 
         # Initialize auto-separation mode
@@ -2210,6 +2389,9 @@ DEFAULT_CONFIG = {
     "separation_padding": 1.0,
     "beep_hertz": BEEP_HERTZ_DEFAULT,
     "show_words": "clean",
+    "detect_mode": "list",
+    "ai_detect_model": "openai/gpt-oss-20b",
+    "ai_detect_prompt": AI_DETECT_PROMPT_DEFAULT,
 }
 
 
@@ -2401,6 +2583,14 @@ def RunMonkeyPlug():
         choices=["full", "clean", "none"],
         default=config.get("show_words", "clean"),
         help="Show detected profanity: full (list with timestamps), clean (count only), none (default: clean)",
+    )
+    parser.add_argument(
+        "--detect",
+        dest="detectMode",
+        type=str,
+        choices=["list", "ai", "both"],
+        default=config.get("detect_mode", "list"),
+        help="Profanity detection method: list (static list), ai (Groq LLM), both (default: list)",
     )
     parser.add_argument(
         "--swears",
@@ -2729,6 +2919,26 @@ def RunMonkeyPlug():
     else:
         sys.tracebacklimit = 0
 
+    # Load Groq API key for AI detection (needed for all modes if --detect ai|both)
+    if args.detectMode in ("ai", "both"):
+        try:
+            from monkeyplug.groq_config import load_groq_api_key
+        except ImportError:
+            from .groq_config import load_groq_api_key
+        if not args.groqApiKey:
+            args.groqApiKey = load_groq_api_key(None, debug=args.debug)
+        if not args.groqApiKey:
+            mmguero.eprint("Groq API key required for --detect ai or --detect both")
+            mmguero.eprint("Provide via --groq-api-key, GROQ_API_KEY env var, ~/.groq/config.json, or ./.groq_key")
+            sys.exit(1)
+    elif args.speechRecMode == SPEECH_REC_MODE_GROQ and not args.groqApiKey:
+        # Load key for Groq STT mode too (existing behavior)
+        try:
+            from monkeyplug.groq_config import load_groq_api_key
+        except ImportError:
+            from .groq_config import load_groq_api_key
+        args.groqApiKey = load_groq_api_key(None, debug=args.debug)
+
     # Set default output pattern if not specified: <input>_clean.<ext>
     if not args.output:
         input_base, input_ext = os.path.splitext(args.input)
@@ -2987,6 +3197,10 @@ def RunMonkeyPlug():
                 auto_generate=file_auto_generate,
                 separation_padding=args_copy.separationPadding,
                 showWords=args_copy.showWords,
+                detectMode=args_copy.detectMode,
+                groqApiKey=args_copy.groqApiKey,
+                aiDetectModel=config.get("ai_detect_model", "openai/gpt-oss-20b"),
+                aiDetectPrompt=config.get("ai_detect_prompt", AI_DETECT_PROMPT_DEFAULT),
             )
 
             print(plug.EncodeCleanAudio())
@@ -3194,6 +3408,10 @@ def RunMonkeyPlug():
             force=args.forceDespiteTag,
             dbug=args.debug,
             showWords=args.showWords,
+            detectMode=args.detectMode,
+            groqApiKey=args.groqApiKey,
+            aiDetectModel=config.get("ai_detect_model", "openai/gpt-oss-20b"),
+            aiDetectPrompt=config.get("ai_detect_prompt", AI_DETECT_PROMPT_DEFAULT),
         )
 
     elif args.speechRecMode == SPEECH_REC_MODE_WHISPER:
@@ -3226,6 +3444,10 @@ def RunMonkeyPlug():
             force=args.forceDespiteTag,
             dbug=args.debug,
             showWords=args.showWords,
+            detectMode=args.detectMode,
+            groqApiKey=args.groqApiKey,
+            aiDetectModel=config.get("ai_detect_model", "openai/gpt-oss-20b"),
+            aiDetectPrompt=config.get("ai_detect_prompt", AI_DETECT_PROMPT_DEFAULT),
         )
 
     elif args.speechRecMode == SPEECH_REC_MODE_GROQ:
@@ -3260,6 +3482,10 @@ def RunMonkeyPlug():
             auto_generate=auto_generate,
             separation_padding=args.separationPadding,
             showWords=args.showWords,
+            detectMode=args.detectMode,
+            groqApiKey=args.groqApiKey,
+            aiDetectModel=config.get("ai_detect_model", "openai/gpt-oss-20b"),
+            aiDetectPrompt=config.get("ai_detect_prompt", AI_DETECT_PROMPT_DEFAULT),
         )
     else:
         raise ValueError(f"Unsupported speech recognition engine {args.speechRecMode}")

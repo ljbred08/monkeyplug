@@ -95,6 +95,17 @@ Controls profanity detection output in normal mode (non-verbose). Three modes:
 
 Default is settable via `show_words` key in config file. CLI `-w full|clean|none` overrides config default. Output goes to stderr via `mmguero.eprint()`. Called from `EncodeCleanAudio()` after `CreateCleanMuteList()` populates `naughtyWordList`.
 
+### AI Detection (--detect)
+
+Profanity detection method. Three modes:
+- **`list`** (default): Static profanity list (current behavior)
+- **`ai`**: Groq LLM with structured outputs replaces the list entirely. Context-aware detection.
+- **`both`**: List + AI combined (OR logic — word flagged if either method catches it)
+
+Requires Groq API key (same key as Groq STT mode). Works with all STT modes (Groq/Vosk/Whisper) as long as the key is available.
+
+Config keys: `detect_mode` (default `"list"`), `ai_detect_model` (default `"openai/gpt-oss-20b"`), `ai_detect_prompt` (custom system prompt). Model must support Groq structured outputs with strict mode (`openai/gpt-oss-20b` or `openai/gpt-oss-120b`).
+
 ### Timing Log
 
 `~/.cache/monkeyplug/timing_log.json` stores running averages per operation (transcribe, extract, encode) for smooth progress bar estimation. Format: `{operation: {total_audio_seconds, total_wall_seconds, run_count}}`. Rate = wall/audio seconds. On first run (no log), falls back to step-based bar. Updated after each successful run. Cleaned by `--clean-cache`.
