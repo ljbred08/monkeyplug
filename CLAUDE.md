@@ -10,7 +10,7 @@ monkeyplug is a CLI tool that censors profanity in audio files. It uses speech r
 
 ### Install for development
 ```bash
-python dev_install.py
+pip install -e .
 ```
 This handles stale package cleanup and editable install. Must be run after any structural changes (new files, moved modules).
 

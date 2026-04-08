@@ -11,7 +11,7 @@ authors = [
 ]
 description = "Enhanced fork of monkeyplug — censors profanity in audio files using speech recognition with Groq API, AI instrumental generation, and batch processing."
 readme = "README.md"
-requires-python = ">=3.6"
+requires-python = ">=3.10"
 classifiers = [
     "License :: OSI Approved :: BSD License",
     "Operating System :: OS Independent",
@@ -27,6 +27,8 @@ dependencies = [
     "numpy>=1.24.0",
     "soundfile>=0.12.0",
     "tqdm>=4.65.0",
+    "shazamio>=0.8.0",
+    "aiohttp>=3.9.0",
 ]
 
 [project.urls]

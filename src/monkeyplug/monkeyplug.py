@@ -378,6 +378,7 @@ class Plugger(object):
         groqApiKey=None,
         aiDetectModel="openai/gpt-oss-20b",
         aiDetectPrompt=AI_DETECT_PROMPT_DEFAULT,
+        disableMetadata=False,
     ):
         self.debug = dbug
         self.outputJson = outputJson
@@ -397,6 +398,8 @@ class Plugger(object):
         self.groqApiKey = groqApiKey
         self.aiDetectModel = aiDetectModel
         self.aiDetectPrompt = aiDetectPrompt
+        self.disableMetadata = disableMetadata
+        self.shazamMetadata = {}
 
         # determine input file name, or download and save file
         if (iFileSpec is not None) and os.path.isfile(iFileSpec):
@@ -571,6 +574,15 @@ class Plugger(object):
             mmguero.eprint(f'Instrumental mode: {self.instrumentalMode}')
             if self.instrumentalMode:
                 mmguero.eprint(f'Instrumental file: {self.instrumentalFileSpec}')
+
+        # Fetch metadata from Shazam if enabled
+        self.shazamMetadata = self._fetch_shazam_metadata()
+        if self.shazamMetadata and self.debug:
+            mmguero.eprint(f'Shazam metadata found:')
+            mmguero.eprint(f'  Title: {self.shazamMetadata.get("title")}')
+            mmguero.eprint(f'  Artist: {self.shazamMetadata.get("artist")}')
+            mmguero.eprint(f'  Genre: {self.shazamMetadata.get("genre")}')
+            mmguero.eprint(f'  Cover art: {self.shazamMetadata.get("cover_art_url")}')
 
     ######## del ##################################################################
     def __del__(self):
@@ -985,6 +997,165 @@ class Plugger(object):
             word = "word" if count == 1 else "words"
             mmguero.eprint(f"{count} {word} detected")
 
+    def _fetch_shazam_metadata(self):
+        """Fetch song metadata from ShazamIO.
+
+        Returns dict with keys: title, artist, genre, cover_art_url, album, year
+        Returns empty dict if recognition fails or metadata disabled.
+        """
+        if self.disableMetadata:
+            return {}
+
+        import asyncio
+        from shazamio import Shazam
+
+        async def recognize():
+            try:
+                shazam = Shazam()
+                result = await shazam.recognize(self.inputFileSpec)
+                track = result.get('track', {})
+
+                metadata = {
+                    'title': track.get('title', ''),
+                    'artist': track.get('subtitle', ''),
+                    'genre': track.get('genres', {}).get('primary', ''),
+                    'cover_art_url': track.get('images', {}).get('coverart', ''),
+                }
+
+                # Album and year may not always be available in base response
+                # Could add track_about() call here for more details if needed
+                return metadata
+            except Exception as e:
+                if self.debug:
+                    mmguero.eprint(f"ShazamIO recognition failed: {e}")
+                return {}
+
+        try:
+            return asyncio.run(recognize())
+        except Exception as e:
+            if self.debug:
+                mmguero.eprint(f"ShazamIO async error: {e}")
+            return {}
+
+    def _embed_metadata(self, output_file):
+        """Embed Shazam metadata into output file using mutagen."""
+        if not self.shazamMetadata:
+            return
+
+        try:
+            # Track file size before
+            size_before = os.path.getsize(output_file)
+            if self.debug:
+                mmguero.eprint(f"Metadata embed: File size before: {size_before} bytes")
+
+            # Detect file type and use appropriate mutagen API
+            # Detect file type and use appropriate mutagen API
+            ext = os.path.splitext(output_file)[1].lower()
+
+            if ext == '.mp3':
+                # MP3 files - use ID3 directly (not easy mode) for cover art support
+                from mutagen.mp3 import MP3
+                from mutagen.id3 import ID3, TIT2, TPE1, TCON, TALB, TDRC, APIC
+
+                audio = MP3(output_file)
+
+                # Clear existing tags and start fresh
+                audio.tags = ID3()
+
+                # Add text tags
+                if self.shazamMetadata.get('title'):
+                    audio.tags.add(TIT2(encoding=3, text=self.shazamMetadata['title']))
+                if self.shazamMetadata.get('artist'):
+                    audio.tags.add(TPE1(encoding=3, text=self.shazamMetadata['artist']))
+                if self.shazamMetadata.get('genre'):
+                    audio.tags.add(TCON(encoding=3, text=self.shazamMetadata['genre']))
+                if self.shazamMetadata.get('album'):
+                    audio.tags.add(TALB(encoding=3, text=self.shazamMetadata['album']))
+                if self.shazamMetadata.get('year'):
+                    audio.tags.add(TDRC(encoding=3, text=str(self.shazamMetadata['year'])))
+
+                # Add cover art
+                if self.shazamMetadata.get('cover_art_url'):
+                    try:
+                        import requests
+                        if self.debug:
+                            mmguero.eprint(f"Fetching cover art from: {self.shazamMetadata['cover_art_url']}")
+                        response = requests.get(self.shazamMetadata['cover_art_url'], timeout=10)
+                        if response.status_code == 200:
+                            # Add new cover art
+                            audio.tags.add(APIC(
+                                encoding=3,
+                                mime='image/jpeg',
+                                type=3,  # 3 = cover front
+                                desc='Cover',
+                                data=response.content
+                            ))
+                            if self.debug:
+                                mmguero.eprint(f"Embedded cover art ({len(response.content)} bytes)")
+                        else:
+                            if self.debug:
+                                mmguero.eprint(f"Failed to fetch cover art: HTTP {response.status_code}")
+                    except Exception as e:
+                        if self.debug:
+                            mmguero.eprint(f"Failed to embed cover art: {e}")
+
+                audio.save(v2_version=3)  # ID3v2.3 for better compatibility
+                if self.debug:
+                    # Verify it was actually saved
+                    try:
+                        from mutagen.mp3 import MP3
+                        check = MP3(output_file)
+                        apic_found = False
+                        if check.tags:
+                            for tag in check.tags.values():
+                                if hasattr(tag, 'FrameID') and tag.FrameID == 'APIC':
+                                    apic_found = True
+                                    mmguero.eprint(f"✓ Cover art verified in output file ({len(tag.data)} bytes)")
+                                    break
+                        if not apic_found:
+                            mmguero.eprint(f"✗ Cover art NOT found in output file after save!")
+                            mmguero.eprint(f"  Tags in file: {list(check.tags.keys()) if check.tags else 'None'}")
+                    except Exception as verify_error:
+                        mmguero.eprint(f"Verification error: {verify_error}")
+
+                # Track file size after
+                size_after = os.path.getsize(output_file)
+                if self.debug:
+                    mmguero.eprint(f"Metadata embed: File size after: {size_after} bytes (delta: {size_after - size_before})")
+            else:
+                # For other formats, use easy mode (no cover art support for now)
+                mut = mutagen.File(output_file, easy=True)
+                if mut is None or not hasattr(mut, '__setitem__'):
+                    if self.debug:
+                        mmguero.eprint(f"Cannot embed metadata in {output_file}")
+                    return
+
+                # Embed standard tags
+                if self.shazamMetadata.get('title'):
+                    mut['title'] = self.shazamMetadata['title']
+                if self.shazamMetadata.get('artist'):
+                    mut['artist'] = self.shazamMetadata['artist']
+                if self.shazamMetadata.get('genre'):
+                    mut['genre'] = self.shazamMetadata['genre']
+                if self.shazamMetadata.get('album'):
+                    mut['album'] = self.shazamMetadata['album']
+                if self.shazamMetadata.get('year'):
+                    mut['date'] = self.shazamMetadata['year']
+
+                mut.save(output_file)
+
+            if self.verbose_level:
+                mmguero.eprint(f"Embedded metadata: {self.shazamMetadata.get('title')} - {self.shazamMetadata.get('artist')}")
+                if self.shazamMetadata.get('cover_art_url'):
+                    mmguero.eprint(f"Cover art: {self.shazamMetadata.get('cover_art_url')}")
+
+        except Exception as e:
+            if self.debug:
+                mmguero.eprint(f"Failed to embed metadata: {e}")
+            import traceback
+            if self.debug:
+                mmguero.eprint(traceback.format_exc())
+
     def _ai_detect_profanity(self):
         """Use Groq chat API with structured outputs to detect profanity."""
         import time as _time
@@ -1398,6 +1569,9 @@ class Plugger(object):
             if step_timings is not None:
                 step_timings['encode'] = (actual_encode, file_duration)
 
+            # Embed Shazam metadata if available
+            self._embed_metadata(self.outputFileSpec)
+
             SetMonkeyplugTag(self.outputFileSpec, debug=self.debug)
 
             # Complete progress and save timing data
@@ -1478,6 +1652,7 @@ class VoskPlugger(Plugger):
         groqApiKey=None,
         aiDetectModel="openai/gpt-oss-20b",
         aiDetectPrompt=AI_DETECT_PROMPT_DEFAULT,
+        disableMetadata=False,
     ):
         self.wavReadFramesChunk = wChunk
         self.modelPath = None
@@ -1530,6 +1705,7 @@ class VoskPlugger(Plugger):
             groqApiKey=groqApiKey,
             aiDetectModel=aiDetectModel,
             aiDetectPrompt=aiDetectPrompt,
+            disableMetadata=disableMetadata,
         )
 
         self.tmpWavFileSpec = self.inputFileParts[0] + ".wav"
@@ -1671,6 +1847,7 @@ class WhisperPlugger(Plugger):
         groqApiKey=None,
         aiDetectModel="openai/gpt-oss-20b",
         aiDetectPrompt=AI_DETECT_PROMPT_DEFAULT,
+        disableMetadata=False,
     ):
         self.whisper = None
         self.model = None
@@ -1720,6 +1897,7 @@ class WhisperPlugger(Plugger):
             groqApiKey=groqApiKey,
             aiDetectModel=aiDetectModel,
             aiDetectPrompt=aiDetectPrompt,
+            disableMetadata=disableMetadata,
         )
 
         if self.debug:
@@ -1810,6 +1988,7 @@ class GroqPlugger(Plugger):
         groqApiKey=None,
         aiDetectModel="openai/gpt-oss-20b",
         aiDetectPrompt=AI_DETECT_PROMPT_DEFAULT,
+        disableMetadata=False,
     ):
         # Import groq_config - handle both relative and absolute imports
         try:
@@ -1858,6 +2037,7 @@ class GroqPlugger(Plugger):
             groqApiKey=groqApiKey,
             aiDetectModel=aiDetectModel,
             aiDetectPrompt=aiDetectPrompt,
+            disableMetadata=disableMetadata,
         )
 
         # Initialize auto-separation mode
@@ -2814,6 +2994,14 @@ def RunMonkeyPlug():
     )
 
     parser.add_argument(
+        "--disable-metadata",
+        dest="disableMetadata",
+        action="store_true",
+        default=False,
+        help="Disable automatic metadata fetching via ShazamIO",
+    )
+
+    parser.add_argument(
         "--clean-cache",
         dest="cleanCache",
         action="store_true",
@@ -3412,6 +3600,7 @@ def RunMonkeyPlug():
             groqApiKey=args.groqApiKey,
             aiDetectModel=config.get("ai_detect_model", "openai/gpt-oss-20b"),
             aiDetectPrompt=config.get("ai_detect_prompt", AI_DETECT_PROMPT_DEFAULT),
+            disableMetadata=args.disableMetadata,
         )
 
     elif args.speechRecMode == SPEECH_REC_MODE_WHISPER:
@@ -3448,6 +3637,7 @@ def RunMonkeyPlug():
             groqApiKey=args.groqApiKey,
             aiDetectModel=config.get("ai_detect_model", "openai/gpt-oss-20b"),
             aiDetectPrompt=config.get("ai_detect_prompt", AI_DETECT_PROMPT_DEFAULT),
+            disableMetadata=args.disableMetadata,
         )
 
     elif args.speechRecMode == SPEECH_REC_MODE_GROQ:
@@ -3486,6 +3676,7 @@ def RunMonkeyPlug():
             groqApiKey=args.groqApiKey,
             aiDetectModel=config.get("ai_detect_model", "openai/gpt-oss-20b"),
             aiDetectPrompt=config.get("ai_detect_prompt", AI_DETECT_PROMPT_DEFAULT),
+            disableMetadata=args.disableMetadata,
         )
     else:
         raise ValueError(f"Unsupported speech recognition engine {args.speechRecMode}")
