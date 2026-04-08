@@ -10,7 +10,9 @@ The CLI command is still `monkeyplug` — only the package name changed to avoid
 
 - **Groq API** integration (fast, default mode)
 - **AI instrumental generation** via sherpa-onnx source separation
+- **AI profanity detection** via Groq LLM with structured outputs
 - **Wildcard/batch processing** with automatic vocal detection
+- **Progress bar** for non-verbose mode
 - **Transcript save/reuse** for faster reprocessing
 - **Config file** support with sensible defaults
 
@@ -70,6 +72,7 @@ echo 'gsk_...' > .groq_key
 
 ```bash
 # Basic usage — mutes profanity using Groq API and built-in word list
+# Shows progress bar automatically in non-verbose mode
 monkeyplug -i song.mp3 -o song_clean.mp3
 
 # Verbose output to see what's happening
@@ -205,12 +208,53 @@ monkeyplug -i song.mp3 -o song_clean_strict.mp3 --input-transcript song_clean_tr
 
 ```bash
 # Use a custom text file (one word per line, or word|replacement)
-monkeyplug -i podcast.mp3 -o podcast_clean.mp3 -w custom_swears.txt
+monkeyplug -i podcast.mp3 -o podcast_clean.mp3 --swears custom_swears.txt
 
 # Use a custom JSON file (array of strings)
-monkeyplug -i podcast.mp3 -o podcast_clean.mp3 -w custom_swears.json
+monkeyplug -i podcast.mp3 -o podcast_clean.mp3 --swears custom_swears.json
 
 # Custom words are merged with the built-in profanity list
+```
+
+## Show Profanity Output
+
+Control what's printed about detected profanity in normal (non-verbose) mode:
+
+```bash
+# Show count only (default)
+monkeyplug -i song.mp3 -o song_clean.mp3 -w clean
+
+# Show full list with timestamps
+monkeyplug -i song.mp3 -o song_clean.mp3 -w full
+
+# Silent mode (no profanity output)
+monkeyplug -i song.mp3 -o song_clean.mp3 -w none
+```
+
+## AI Profanity Detection
+
+Use Groq's LLM for context-aware profanity detection instead of (or in addition to) the static word list:
+
+```bash
+# AI-only detection (replaces static list)
+monkeyplug -i song.mp3 -o song_clean.mp3 --detect ai
+
+# Both list + AI (word flagged if either catches it)
+monkeyplug -i song.mp3 -o song_clean.mp3 --detect both
+
+# Default: static list only
+monkeyplug -i song.mp3 -o song_clean.mp3 --detect list
+```
+
+Requires a Groq API key (same setup as Groq STT mode). Works with all speech recognition modes (Groq, Whisper, Vosk).
+
+Configurable via `~/.cache/monkeyplug/config.json`:
+```json
+{
+  "detect_mode": "list",
+  "ai_detect_model": "openai/gpt-oss-20b",
+  "ai_detect_prompt": "You are a profanity detection assistant..."
+}
 ```
 
 ## Config File
@@ -228,7 +272,11 @@ If neither exists, a default config is auto-created at `~/.cache/monkeyplug/conf
   "pad_milliseconds_pre": 10,
   "pad_milliseconds_post": 10,
   "separation_padding": 1.0,
-  "beep_hertz": 1000
+  "beep_hertz": 1000,
+  "show_words": "clean",
+  "detect_mode": "list",
+  "ai_detect_model": "openai/gpt-oss-20b",
+  "ai_detect_prompt": "You are a profanity detection assistant..."
 }
 ```
 
@@ -271,7 +319,9 @@ Censorship Modes:
   --instrumental-auto-candidates <int>  Top candidates for AUTO matching (default: 5)
 
 Profanity:
-  -w, --swears <file>               Custom profanity list (text or JSON)
+  --swears <file>                   Custom profanity list (text or JSON)
+  --detect <list|ai|both>           Profanity detection method (default: list)
+  -w, --show-words <clean|full|none>  Show detected profanity (default: clean)
   --pad-milliseconds <int>          Padding around profanity (default: 10)
   --pad-milliseconds-pre <int>      Padding before profanity (default: 10)
   --pad-milliseconds-post <int>     Padding after profanity (default: 10)

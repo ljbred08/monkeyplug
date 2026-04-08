@@ -106,6 +106,15 @@ Requires Groq API key (same key as Groq STT mode). Works with all STT modes (Gro
 
 Config keys: `detect_mode` (default `"list"`), `ai_detect_model` (default `"openai/gpt-oss-20b"`), `ai_detect_prompt` (custom system prompt). Model must support Groq structured outputs with strict mode (`openai/gpt-oss-20b` or `openai/gpt-oss-120b`).
 
+### Progress Bar (tqdm)
+
+In non-verbose mode (default), a tqdm progress bar shows overall progress. Steps displayed:
+- **Transcribing** — Speech recognition (or loading transcript)
+- **Extracting instrumental** — Only shown in auto-generation mode
+- **Encoding** — FFmpeg processing
+
+Uses timing data from `~/.cache/monkeyplug/timing_log.json` for smooth estimation. On first run, falls back to step-based bar. Progress updates happen inside `CreateCleanMuteList()` and `EncodeCleanAudio()`. Disabled entirely when `-v` flag is used.
+
 ### Timing Log
 
 `~/.cache/monkeyplug/timing_log.json` stores running averages per operation (transcribe, extract, encode) for smooth progress bar estimation. Format: `{operation: {total_audio_seconds, total_wall_seconds, run_count}}`. Rate = wall/audio seconds. On first run (no log), falls back to step-based bar. Updated after each successful run. Cleaned by `--clean-cache`.
@@ -128,6 +137,7 @@ When input contains `*`, `expand_and_detect_vocals()` uses Groq API to detect wh
 ## Key External Dependencies
 
 - **mmguero** (2.0.3): Utility library for process execution, JSON parsing, string helpers
+- **tqdm** (>=4.65.0): Progress bar display
 - **sherpa-onnx**: AI source separation (Spleeter int8 model, CPU-only, 4 threads)
 - **soundfile + numpy**: Audio I/O for sherpa-onnx integration
 - **mutagen**: Audio metadata read/write (used to tag processed files)
