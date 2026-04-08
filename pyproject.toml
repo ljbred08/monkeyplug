@@ -3,12 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "monkeyplug"
+name = "monkeyplug-enhanced"
 version = "2.2.0"
 authors = [
   { name="Seth Grover", email="mero.mero.guero@gmail.com" },
+  { name="Lincoln Brown", email="link@brown.fm" },
 ]
-description = "monkeyplug is a script to censor profanity in audio files using speech recognition with Groq API and instrumental splicing support."
+description = "Enhanced fork of monkeyplug — censors profanity in audio files using speech recognition with Groq API, AI instrumental generation, and batch processing."
 readme = "README.md"
 requires-python = ">=3.6"
 classifiers = [
@@ -28,9 +29,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/mmguero/monkeyplug"
-Issues = "https://github.com/mmguero/monkeyplug/issues"
-Repository = "https://github.com/mmguero/monkeyplug.git"
+Homepage = "https://github.com/ljbred08/monkeyplug"
+Issues = "https://github.com/ljbred08/monkeyplug/issues"
+Repository = "https://github.com/ljbred08/monkeyplug.git"
 
 [tool.hatch.build]
 include = [

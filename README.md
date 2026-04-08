@@ -1,10 +1,13 @@
-# monkeyplug
+# monkeyplug-enhanced
 
-[![Latest Version](https://img.shields.io/pypi/v/monkeyplug)](https://pypi.python.org/pypi/monkeyplug/) [![VOSK Docker Images](https://github.com/mmguero/monkeyplug/workflows/monkeyplug-build-push-vosk-ghcr/badge.svg)](https://github.com/mmguero/monkeyplug/pkgs/container/monkeyplug) [![Whisper Docker Images](https://github.com/mmguero/monkeyplug/workflows/monkeyplug-build-push-whisper-ghcr/badge.svg)](https://github.com/mmguero/monkeyplug/pkgs/container/monkeyplug)
+[![Latest Version](https://img.shields.io/pypi/v/monkeyplug-enhanced)](https://pypi.python.org/pypi/monkeyplug-enhanced/) [![VOSK Docker Images](https://github.com/mmguero/monkeyplug/workflows/monkeyplug-build-push-vosk-ghcr/badge.svg)](https://github.com/mmguero/monkeyplug/pkgs/container/monkeyplug) [![Whisper Docker Images](https://github.com/mmguero/monkeyplug/workflows/monkeyplug-build-push-whisper-ghcr/badge.svg)](https://github.com/mmguero/monkeyplug/pkgs/container/monkeyplug)
 
-**monkeyplug** censors profanity in audio files using speech recognition. It detects profanity timestamps and either mutes, beeps, or splices in instrumental audio using FFmpeg.
+**monkeyplug-enhanced** is an enhanced fork of [mmguero/monkeyplug](https://github.com/mmguero/monkeyplug) (available on PyPI as `monkeyplug`). It censors profanity in audio files using speech recognition, detecting profanity timestamps and either muting, beeping, or splicing in instrumental audio using FFmpeg.
 
-**This is a fork** of [mmguero/monkeyplug](https://github.com/mmguero/monkeyplug) with:
+The CLI command is still `monkeyplug` — only the package name changed to avoid conflicting with the original.
+
+### Enhancements over the original
+
 - **Groq API** integration (fast, default mode)
 - **AI instrumental generation** via sherpa-onnx source separation
 - **Wildcard/batch processing** with automatic vocal detection
@@ -23,13 +26,13 @@ If provided a video file, monkeyplug processes the audio stream and remultiplexe
 ## Installation
 
 ```bash
-pip install monkeyplug
+pip install monkeyplug-enhanced
 ```
 
 Or install from GitHub:
 
 ```bash
-pip install 'git+https://github.com/mmguero/monkeyplug'
+pip install 'git+https://github.com/ljbred08/monkeyplug'
 ```
 
 ### Prerequisites
@@ -327,6 +330,7 @@ Pull requests welcome!
 ## Authors
 
 - **Seth Grover** - Initial work - [mmguero](https://github.com/mmguero)
+- **Lincoln Brown** - Enhanced fork (Groq API, AI generation, batch mode) - [ljbred08](https://github.com/ljbred08)
 
 ## License
 
