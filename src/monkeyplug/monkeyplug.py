@@ -581,6 +581,8 @@ class Plugger(object):
             mmguero.eprint(f'Shazam metadata found:')
             mmguero.eprint(f'  Title: {self.shazamMetadata.get("title")}')
             mmguero.eprint(f'  Artist: {self.shazamMetadata.get("artist")}')
+            mmguero.eprint(f'  Album: {self.shazamMetadata.get("album")}')
+            mmguero.eprint(f'  Year: {self.shazamMetadata.get("year")}')
             mmguero.eprint(f'  Genre: {self.shazamMetadata.get("genre")}')
             mmguero.eprint(f'  Cover art: {self.shazamMetadata.get("cover_art_url")}')
 
@@ -1015,15 +1017,46 @@ class Plugger(object):
                 result = await shazam.recognize(self.inputFileSpec)
                 track = result.get('track', {})
 
+                if self.debug:
+                    mmguero.eprint(f"Full Shazam track response: {track}")
+
+                # Extract album from sections metadata (recommended by ShazamIO maintainer)
+                # Look for section where type == "SONG" and metadata item with title == "Album"
+                album = ''
+                for section in track.get('sections', []):
+                    if section.get('type') == 'SONG':
+                        for item in section.get('metadata', []):
+                            if item.get('title') == 'Album':
+                                album = item.get('text', '')
+                                break
+                        if album:
+                            break
+
+                # Extract year from sections metadata
+                year = ''
+                for section in track.get('sections', []):
+                    if section.get('type') == 'SONG':
+                        for item in section.get('metadata', []):
+                            if item.get('title') == 'Released':
+                                # Extract year from release date (e.g., "2015-09-25")
+                                import re
+                                date_text = item.get('text', '')
+                                date_match = re.search(r'\d{4}', date_text)
+                                if date_match:
+                                    year = date_match.group()
+                                    break
+                        if year:
+                            break
+
                 metadata = {
                     'title': track.get('title', ''),
                     'artist': track.get('subtitle', ''),
                     'genre': track.get('genres', {}).get('primary', ''),
+                    'album': album,
+                    'year': year,
                     'cover_art_url': track.get('images', {}).get('coverart', ''),
                 }
 
-                # Album and year may not always be available in base response
-                # Could add track_about() call here for more details if needed
                 return metadata
             except Exception as e:
                 if self.debug:
