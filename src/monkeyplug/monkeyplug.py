@@ -2356,6 +2356,11 @@ def RunMonkeyPlug():
     else:
         sys.tracebacklimit = 0
 
+    # Set default output pattern if not specified: <input>_clean.<ext>
+    if not args.output:
+        input_base, input_ext = os.path.splitext(args.input)
+        args.output = f"{input_base}_clean{input_ext}"
+
     # Check if wildcards are present in input or output
     has_wildcards = '*' in args.input or '*' in args.output
 
