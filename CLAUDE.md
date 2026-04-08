@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-monkeyplug is a CLI tool that censors profanity in audio files. It uses speech recognition to detect profanity timestamps, then either mutes, beeps, or replaces those sections with instrumental audio using FFmpeg. This is a fork of [mmguero/monkeyplug](https://github.com/mmguero/monkeyplug) with Groq API integration and AI-powered instrumental separation added.
+monkeyplug is a CLI tool that censors profanity in audio files. It uses speech recognition to detect profanity timestamps, then either mutes, beeps, or replaces those sections with instrumental audio using FFmpeg. This is a fork of [mmguero/monkeyplug](https://github.com/mmguero/monkeyplug) with Groq API integration, AI-powered instrumental separation, and automatic ShazamIO metadata tagging added.
 
 ## Development Commands
 
@@ -106,6 +106,37 @@ Requires Groq API key (same key as Groq STT mode). Works with all STT modes (Gro
 
 Config keys: `detect_mode` (default `"list"`), `ai_detect_model` (default `"openai/gpt-oss-20b"`), `ai_detect_prompt` (custom system prompt). Model must support Groq structured outputs with strict mode (`openai/gpt-oss-20b` or `openai/gpt-oss-120b`).
 
+### ShazamIO Metadata Tagging (--disable-metadata)
+
+Automatic song identification and metadata tagging via Shazam API. Enabled by default, disabled with `--disable-metadata` flag.
+
+**What it does:**
+1. **Recognition**: Uses ShazamIO to identify the song from the input audio
+2. **Metadata fetch**: Retrieves title, artist, genre, and cover art URL
+3. **Cover art download**: Downloads album artwork (400x400 JPEG)
+4. **Embedding**: Writes ID3 tags to output file (MP3 only for cover art)
+
+**Implementation:**
+- `_fetch_shazam_metadata()`: Async function using `shazamio.Shazam.recognize()`
+- `_embed_metadata()`: Uses `mutagen.mp3.MP3` with direct ID3 tag manipulation
+- Cover art embedded as APIC frame (type=3, cover front)
+- Text tags: TIT2 (title), TPE1 (artist), TCON (genre), TALB (album), TDRC (year)
+
+**Key attributes:**
+- `self.disableMetadata`: Flag to skip metadata fetch (from `--disable-metadata`)
+- `self.shazamMetadata`: Dict containing fetched metadata
+- Called in `Plugger.__init__()` after input file validation
+- Embedded in `EncodeCleanAudio()` after FFmpeg encoding completes
+
+**Format support:**
+- MP3: Full support (text tags + cover art via APIC frames)
+- Other formats: Text tags only via mutagen easy mode
+
+**Error handling:**
+- Graceful degradation if Shazam recognition fails (no error, just no metadata)
+- Network timeouts handled (10 second timeout for cover art download)
+- Debug mode (`-v`) shows recognition progress and errors
+
 ### Progress Bar (tqdm)
 
 In non-verbose mode (default), a tqdm progress bar shows overall progress. Steps displayed:
@@ -140,7 +171,9 @@ When input contains `*`, `expand_and_detect_vocals()` uses Groq API to detect wh
 - **tqdm** (>=4.65.0): Progress bar display
 - **sherpa-onnx**: AI source separation (Spleeter int8 model, CPU-only, 4 threads)
 - **soundfile + numpy**: Audio I/O for sherpa-onnx integration
-- **mutagen**: Audio metadata read/write (used to tag processed files)
+- **mutagen** (1.47.0): Audio metadata read/write (used to tag processed files with Shazam metadata)
+- **shazamio** (>=0.8.0): Song recognition via Shazam API for automatic metadata tagging
+- **aiohttp** (>=3.9.0): Async HTTP client for ShazamIO
 - All FFmpeg operations use `mmguero.run_process()` for subprocess execution
 
 ## Feature Branches

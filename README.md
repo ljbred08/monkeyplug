@@ -15,6 +15,7 @@ The CLI command is still `monkeyplug` — only the package name changed to avoid
 - **Progress bar** for non-verbose mode
 - **Transcript save/reuse** for faster reprocessing
 - **Config file** support with sensible defaults
+- **Automatic metadata tagging** via ShazamIO (title, artist, genre, cover art)
 
 ## How It Works
 
@@ -40,7 +41,7 @@ pip install 'git+https://github.com/ljbred08/monkeyplug'
 ### Prerequisites
 
 - **FFmpeg** — install via your OS package manager or from [ffmpeg.org](https://www.ffmpeg.org/download.html)
-- **Python 3.6+**
+- **Python 3.10+**
 - **Groq API key** (for default mode) — see [Groq API Setup](#groq-api-setup)
 - Optional: [Whisper](https://github.com/openai/whisper) or [Vosk](https://github.com/alphacep/vosk-api) for offline recognition
 
@@ -216,6 +217,33 @@ monkeyplug -i podcast.mp3 -o podcast_clean.mp3 --swears custom_swears.json
 # Custom words are merged with the built-in profanity list
 ```
 
+## Automatic Metadata Tagging
+
+monkeyplug automatically fetches song metadata from Shazam and embeds it into the output file:
+
+- **Title, Artist, Genre** - Text tags embedded in the audio file
+- **Cover Art** - Album artwork downloaded and embedded (MP3 only)
+
+```bash
+# Metadata is enabled by default
+monkeyplug -i song.mp3 -o song_clean.mp3
+
+# Disable metadata fetching
+monkeyplug -i song.mp3 -o song_clean.mp3 --disable-metadata
+```
+
+**What happens:**
+1. The input file is analyzed by Shazam to identify the song
+2. Metadata (title, artist, genre, cover art URL) is retrieved
+3. Cover art is downloaded and embedded as ID3/APIC frames
+4. Text tags are added to the output file
+
+**Notes:**
+- Requires internet connection for Shazam recognition
+- Cover art embedding is supported for MP3 files
+- If recognition fails, the file is still processed (no error)
+- Metadata can be viewed in any music player or with `ffprobe`
+
 ## Show Profanity Output
 
 Control what's printed about detected profanity in normal (non-verbose) mode:
@@ -353,6 +381,7 @@ Audio Output:
 
 Other:
   --force                           Process file even if already tagged
+  --disable-metadata                Disable automatic metadata fetching via ShazamIO
   --clean-cache                     Delete all cached data (models, config) and exit
 
 Groq Options:
