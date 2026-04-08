@@ -9,28 +9,34 @@ monkeyplug is a CLI tool that censors profanity in audio files. It uses speech r
 ## Development Commands
 
 ### Install for development
+
 ```bash
 pip install -e .
 ```
+
 This handles stale package cleanup and editable install. Must be run after any structural changes (new files, moved modules).
 
 ### Reinstall after code changes (usually not needed with editable mode)
+
 ```bash
 pip install -e . --no-deps --force-reinstall
 ```
 
 ### Clear Python cache if stale imports
+
 ```bash
 find . -type d -name __pycache__ -exec rm -rf {} +
 ```
 
 ### Verify installation
+
 ```bash
 python -c "import monkeyplug; print(monkeyplug.__file__)"
 # Should point to src/monkeyplug/__init__.py, NOT site-packages/monkeyplug
 ```
 
 ### Run tests
+
 ```bash
 pytest tests/
 pytest tests/test_swears_loading.py  # single test file
@@ -38,6 +44,7 @@ pytest tests/test_swears_loading.py::test_load_builtin_swears -v  # single test
 ```
 
 ### Run the tool
+
 ```bash
 monkeyplug -i input.mp3 -o output_clean.mp3 -v
 ```
@@ -60,22 +67,26 @@ All classes live in `src/monkeyplug/monkeyplug.py`. The base `Plugger` class han
 1. **Transcription**: Groq API (or Whisper/Vosk) produces `wordList` - a list of dicts with `word`, `start`, `end`, `conf`, `scrub` keys
 2. **Profanity detection**: `naughtyWordList` = words where `scrub=True`, checked against `swearsMap` loaded from built-in JSON + optional custom file
 3. **Segment creation**: Three modes determined by `CreateCleanMuteList()`:
+   
    - **Mute/Beep**: `_create_mute_beep_list()` builds FFmpeg volume/filter chains
+   
    - **Traditional instrumental**: User provides full instrumental file, `_build_instrumental_filters()` uses `asplit` to reference both streams
+   
    - **Auto-separation**: `_create_combined_profanity_file()` extracts profanity segments with padding into one combined WAV, runs through sherpa-onnx `SourceSeparator`, then `_build_instrumental_filters()` splices the AI-generated instrumental back in
 
 ### Module Responsibilities
 
-| File | Purpose |
-|------|---------|
-| `monkeyplug.py` | All classes, CLI argument parsing (`RunMonkeyPlug`), FFmpeg filter building |
-| `groq_config.py` | API key loading (priority: param > env var > `~/.groq/config.json` > `./.groq_key`) |
-| `separation.py` | `SourceSeparator` class wrapping sherpa-onnx Spleeter 2-stems model |
-| `data/profanity_list.json` | Built-in English profanity list, loaded via `importlib.resources` |
+| File                       | Purpose                                                                             |
+| -------------------------- | ----------------------------------------------------------------------------------- |
+| `monkeyplug.py`            | All classes, CLI argument parsing (`RunMonkeyPlug`), FFmpeg filter building         |
+| `groq_config.py`           | API key loading (priority: param > env var > `~/.groq/config.json` > `./.groq_key`) |
+| `separation.py`            | `SourceSeparator` class wrapping sherpa-onnx Spleeter 2-stems model                 |
+| `data/profanity_list.json` | Built-in English profanity list, loaded via `importlib.resources`                   |
 
 ### Auto-Separation Mode (AI Instrumental Generation)
 
 When `--instrumental auto` or `--instrumental generate` is used:
+
 1. Profanity segments are merged (gap < 100ms) into `instrumentalSegments` list of `(start, end)` tuples
 2. Segments are extracted with configurable padding (`separationPadding`, default 1.0s) into one combined WAV
 3. `segMapping` tracks timestamp translation: `(profanity_start, profanity_end, combined_start, combined_end, padded_start, padded_end)`
@@ -89,6 +100,7 @@ Search order (first found wins): `./.monkeyplug.json` (CWD) → `~/.cache/monkey
 ### Show Words (-w / --show-words)
 
 Controls profanity detection output in normal mode (non-verbose). Three modes:
+
 - **`full`**: Print each detected word with timestamp (`"word" (M:SS.mmm - M:SS.mmm)`) + count
 - **`clean`** (default): Print only the count (e.g., "3 words detected" or "No profanity detected")
 - **`none`**: Silent — no profanity output at all
@@ -98,6 +110,7 @@ Default is settable via `show_words` key in config file. CLI `-w full|clean|none
 ### AI Detection (--detect)
 
 Profanity detection method. Three modes:
+
 - **`list`** (default): Static profanity list (current behavior)
 - **`ai`**: Groq LLM with structured outputs replaces the list entirely. Context-aware detection.
 - **`both`**: List + AI combined (OR logic — word flagged if either method catches it)
@@ -111,28 +124,33 @@ Config keys: `detect_mode` (default `"list"`), `ai_detect_model` (default `"open
 Automatic song identification and metadata tagging via Shazam API. Enabled by default, disabled with `--disable-metadata` flag.
 
 **What it does:**
+
 1. **Recognition**: Uses ShazamIO to identify the song from the input audio
 2. **Metadata fetch**: Retrieves title, artist, genre, and cover art URL
 3. **Cover art download**: Downloads album artwork (400x400 JPEG)
 4. **Embedding**: Writes ID3 tags to output file (MP3 only for cover art)
 
 **Implementation:**
+
 - `_fetch_shazam_metadata()`: Async function using `shazamio.Shazam.recognize()`
 - `_embed_metadata()`: Uses `mutagen.mp3.MP3` with direct ID3 tag manipulation
 - Cover art embedded as APIC frame (type=3, cover front)
 - Text tags: TIT2 (title), TPE1 (artist), TCON (genre), TALB (album), TDRC (year)
 
 **Key attributes:**
+
 - `self.disableMetadata`: Flag to skip metadata fetch (from `--disable-metadata`)
 - `self.shazamMetadata`: Dict containing fetched metadata
 - Called in `Plugger.__init__()` after input file validation
 - Embedded in `EncodeCleanAudio()` after FFmpeg encoding completes
 
 **Format support:**
+
 - MP3: Full support (text tags + cover art via APIC frames)
 - Other formats: Text tags only via mutagen easy mode
 
 **Error handling:**
+
 - Graceful degradation if Shazam recognition fails (no error, just no metadata)
 - Network timeouts handled (10 second timeout for cover art download)
 - Debug mode (`-v`) shows recognition progress and errors
@@ -140,6 +158,7 @@ Automatic song identification and metadata tagging via Shazam API. Enabled by de
 ### Progress Bar (tqdm)
 
 In non-verbose mode (default), a tqdm progress bar shows overall progress. Steps displayed:
+
 - **Transcribing** — Speech recognition (or loading transcript)
 - **Extracting instrumental** — Only shown in auto-generation mode
 - **Encoding** — FFmpeg processing
@@ -165,6 +184,8 @@ Uses timing data from `~/.cache/monkeyplug/timing_log.json` for smooth estimatio
 
 When input contains `*`, `expand_and_detect_vocals()` uses Groq API to detect which files have vocals, skipping instrumentals. Each vocal file is processed individually.
 
+**Skip completed songs:** The `--skip-completed-songs` flag skips input files that already have a corresponding output file. For example, with `-i "*.mp3" -o "*_clean.mp3"`, if both `song.mp3` and `song_clean.mp3` exist, `song.mp3` will be skipped. Only applies when using wildcards.
+
 ## Key External Dependencies
 
 - **mmguero** (2.0.3): Utility library for process execution, JSON parsing, string helpers
@@ -183,3 +204,7 @@ When input contains `*`, `expand_and_detect_vocals()` uses Groq API to detect wh
 ## Version Bumping
 
 Always bump the **patch** version (e.g. 2.2.2 → 2.2.3) unless the user explicitly requests a minor or major bump.
+
+# Docs
+
+ALWAYS update relevant documentation files (README.md, CLAUDE.md, etc.) BEFORE committing.

@@ -2476,6 +2476,7 @@ def expand_and_detect_vocals(input_pattern, output_pattern, args, skip_detection
     output_regex = pattern_to_regex(output_pattern)
     filtered_files = []
     skipped_output_files = []
+    skipped_completed_files = []
 
     for filepath in input_files:
         basename = os.path.basename(filepath)
@@ -2485,6 +2486,14 @@ def expand_and_detect_vocals(input_pattern, output_pattern, args, skip_detection
             if args.debug:
                 mmguero.eprint(f'Skipping output file: {basename} (matches output pattern)')
         else:
+            # Check if --skip-completed-songs is enabled and output file exists
+            if args.skipCompletedSongs:
+                expected_output = apply_output_pattern(filepath, output_pattern)
+                if os.path.isfile(expected_output):
+                    skipped_completed_files.append(filepath)
+                    if args.debug:
+                        mmguero.eprint(f'Skipping completed file: {basename} (output exists: {os.path.basename(expected_output)})')
+                    continue
             filtered_files.append(filepath)
 
     input_files = filtered_files
@@ -2494,7 +2503,12 @@ def expand_and_detect_vocals(input_pattern, output_pattern, args, skip_detection
         return [], [], []
 
     if args.debug:
-        mmguero.eprint(f'Expanded wildcard to {len(input_files)} file(s) (skipped {len(skipped_output_files)} output files)')
+        msg = f'Expanded wildcard to {len(input_files)} file(s)'
+        if skipped_output_files:
+            msg += f' (skipped {len(skipped_output_files)} output files)'
+        if skipped_completed_files:
+            msg += f' (skipped {len(skipped_completed_files)} completed files)'
+        mmguero.eprint(msg)
 
     if skip_detection:
         if args.debug:
@@ -2551,7 +2565,12 @@ def expand_and_detect_vocals(input_pattern, output_pattern, args, skip_detection
                 mmguero.eprint(f'  ✗ No vocals → skipping (likely instrumental)')
 
     if args.debug:
-        mmguero.eprint(f'\nVocal detection complete: {len(vocal_files)} vocal, {len(instrumental_files)} instrumental, {len(skipped_output_files)} already processed')
+        msg = f'\nVocal detection complete: {len(vocal_files)} vocal, {len(instrumental_files)} instrumental'
+        if skipped_output_files:
+            msg += f', {len(skipped_output_files)} already processed'
+        if skipped_completed_files:
+            msg += f', {len(skipped_completed_files)} skipped (output exists)'
+        mmguero.eprint(msg)
 
     return vocal_files, instrumental_files, output_files
 
@@ -2745,6 +2764,12 @@ def RunMonkeyPlug():
         required=False,
         metavar="<string>",
         help="Output file",
+    )
+    parser.add_argument(
+        "--skip-completed-songs",
+        dest="skipCompletedSongs",
+        action="store_true",
+        help="Skip input files that already have a corresponding output file (wildcard mode only)",
     )
     parser.add_argument(
         "--output-json",
