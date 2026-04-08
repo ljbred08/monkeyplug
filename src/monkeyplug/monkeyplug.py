@@ -17,6 +17,7 @@ import shutil
 import string
 import sys
 import wave
+from tqdm import tqdm
 
 from urllib.parse import urlparse
 from itertools import tee
@@ -683,7 +684,17 @@ class Plugger(object):
             # Extract, separate, and get instrumental file
             if self.instrumentalSegments:
                 try:
+                    # Update progress bar to show extraction starting
+                    if hasattr(self, '_progress') and self._progress and not self.debug:
+                        self._progress.update(1)
+                        self._progress.total = 3
+                        self._progress.set_description("Extracting instrumental")
+
                     self.instrumentalFileSpec = self._create_combined_profanity_file()
+
+                    # Update progress after extraction completes
+                    if hasattr(self, '_progress') and self._progress and not self.debug:
+                        self._progress.update(1)
                     if self.instrumentalFileSpec:
                         self.instrumentalMode = True
                         self._build_instrumental_filters()
@@ -899,7 +910,54 @@ class Plugger(object):
     ######## EncodeCleanAudio ####################################################
     def EncodeCleanAudio(self):
         if (self.forceDespiteTag is True) or (GetMonkeyplugTagged(self.inputFileSpec, debug=self.debug) is False):
+            # Initialize progress (only when not in debug mode)
+            progress = None
+            if not self.debug:
+                # Determine first action
+                if not self.inputTranscript:
+                    initial_desc = "Transcribing"
+                else:
+                    initial_desc = "Processing"
+
+                progress = tqdm(
+                    total=1,  # Will be updated based on actual steps
+                    desc=initial_desc,
+                    unit="step",
+                    disable=False,
+                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                )
+
+            # Store progress reference for use in CreateCleanMuteList
+            self._progress = progress
+
             self.CreateCleanMuteList()
+
+            # Update progress after CreateCleanMuteList
+            if progress:
+                did_extraction = (
+                    hasattr(self, 'autoGenerateMode') and
+                    self.autoGenerateMode and
+                    hasattr(self, 'segMapping') and
+                    self.segMapping
+                )
+
+                if not self.inputTranscript and not did_extraction:
+                    # Transcription done inside CreateCleanMuteList, no extraction
+                    progress.update(1)
+                    progress.total = 2
+                    progress.set_description("Encoding")
+                elif not self.inputTranscript and did_extraction:
+                    # Both transcription and extraction handled inside CreateCleanMuteList
+                    # Just set description to encoding
+                    progress.set_description("Encoding")
+                elif self.inputTranscript and did_extraction:
+                    # Extraction handled inside CreateCleanMuteList (no transcription update needed)
+                    progress.total = 2
+                    progress.set_description("Encoding")
+                else:
+                    # No transcription, no extraction - just encoding
+                    progress.total = 1
+                    progress.set_description("Encoding")
 
             # Handle instrumental mode differently
             if self.instrumentalMode:
@@ -981,8 +1039,19 @@ class Plugger(object):
 
             SetMonkeyplugTag(self.outputFileSpec, debug=self.debug)
 
+            # Complete progress
+            if progress:
+                progress.update(1)
+                progress.close()
+
         else:
             shutil.copyfile(self.inputFileSpec, self.outputFileSpec)
+            if progress:
+                progress.close()
+
+        # Clean up progress reference
+        if hasattr(self, '_progress'):
+            delattr(self, '_progress')
 
         return self.outputFileSpec
 
