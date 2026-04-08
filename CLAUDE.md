@@ -86,6 +86,10 @@ When `--instrumental auto` or `--instrumental generate` is used:
 
 Search order (first found wins): `./.monkeyplug.json` (CWD) → `~/.cache/monkeyplug/config.json`. If neither exists, a default config is auto-created at the latter path. Config provides defaults for padding and beep settings, overridable by CLI args. Clean all caches: `monkeyplug --clean-cache`.
 
+### Timing Log
+
+`~/.cache/monkeyplug/timing_log.json` stores running averages per operation (transcribe, extract, encode) for smooth progress bar estimation. Format: `{operation: {total_audio_seconds, total_wall_seconds, run_count}}`. Rate = wall/audio seconds. On first run (no log), falls back to step-based bar. Updated after each successful run. Cleaned by `--clean-cache`.
+
 ### FFmpeg Patterns
 
 - **Traditional instrumental**: `[0:a]asplit=2[orig][inst]` then `atrim` from each stream + `concat`

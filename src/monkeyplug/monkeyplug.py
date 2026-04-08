@@ -16,6 +16,8 @@ import requests
 import shutil
 import string
 import sys
+import threading
+import time
 import wave
 from tqdm import tqdm
 
@@ -219,6 +221,63 @@ def GetCodecs(local_filename, debug=False):
             raise ValueError(f"Could not analyze {local_filename}")
 
     return result
+
+
+###################################################################################################
+class _SmoothProgressTicker:
+    """Background thread that smoothly advances a tqdm bar based on elapsed time.
+
+    Used when historical timing data allows estimating step durations.
+    The bar advances linearly within each step's estimated range, clamped
+    so it never overshoots. When the step completes, stop() snaps to actual.
+    """
+
+    def __init__(self, bar):
+        self._bar = bar
+        self._cumulative = 0.0  # Position where current step begins
+        self._step_estimate = 0.0  # Estimated seconds for current step
+        self._step_start = 0.0  # time.time() when step started
+        self._stop_event = threading.Event()
+        self._thread = None
+
+    def start(self, cumulative, step_estimated_seconds):
+        """Begin ticking for a new step."""
+        self.stop()  # Stop any previous tick
+        self._cumulative = cumulative
+        self._step_estimate = step_estimated_seconds
+        self._step_start = time.time()
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._tick, daemon=True)
+        self._thread.start()
+
+    def _tick(self):
+        while not self._stop_event.is_set():
+            try:
+                elapsed = time.time() - self._step_start
+                position = self._cumulative + min(elapsed, self._step_estimate)
+                # Never exceed the bar's total
+                if self._bar.total is not None:
+                    position = min(position, self._bar.total)
+                self._bar.n = position
+                self._bar.refresh()
+            except (TypeError, ValueError, AttributeError):
+                break  # Bar was closed externally
+            self._stop_event.wait(0.25)
+
+    def stop(self):
+        """Stop the ticker and return actual elapsed seconds for this step."""
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+        self._thread = None
+        if self._step_start > 0:
+            return time.time() - self._step_start
+        return 0.0
+
+    def adjust_total(self, delta):
+        """Adjust the bar's total by delta (e.g., remove an unused step estimate)."""
+        if self._bar.total is not None:
+            self._bar.total = max(self._bar.total + delta, self._bar.n)
 
 
 #################################################################################
@@ -670,9 +729,29 @@ class Plugger(object):
 
     ######## CreateCleanMuteList #################################################
     def CreateCleanMuteList(self):
-        # Try to load existing transcript first, otherwise perform speech recognition
+        smooth = hasattr(self, '_smooth_ticker') and self._smooth_ticker is not None
+        cumulative = getattr(self, '_smooth_cumulative', 0.0)
+        will_transcribe = getattr(self, '_will_transcribe', False)
+
+        # Start ticker for transcribe step (if applicable)
+        if smooth and will_transcribe:
+            est = getattr(self, '_smooth_transcribe_est', 0)
+            if hasattr(self, '_progress') and self._progress:
+                self._progress.set_description("Transcribing")
+            self._smooth_ticker.start(cumulative, est)
+
+        transcribe_start = time.time() if will_transcribe else 0
         if not self.LoadTranscriptFromFile():
             self.RecognizeSpeech()
+
+        if will_transcribe:
+            actual_transcribe = time.time() - transcribe_start
+            if smooth:
+                self._smooth_ticker.stop()
+                cumulative += actual_transcribe
+                self._smooth_cumulative = cumulative
+            if hasattr(self, '_step_timings') and self._step_timings is not None:
+                self._step_timings['transcribe'] = (actual_transcribe, getattr(self, '_timing_file_duration', 0))
 
         self.naughtyWordList = [word for word in self.wordList if word["scrub"] is True]
 
@@ -684,29 +763,57 @@ class Plugger(object):
             # Extract, separate, and get instrumental file
             if self.instrumentalSegments:
                 try:
-                    # Update progress bar to show extraction starting
+                    # Update progress bar for extraction step
                     if hasattr(self, '_progress') and self._progress and not self.debug:
-                        self._progress.update(1)
-                        self._progress.total = 3
-                        self._progress.set_description("Extracting instrumental")
+                        if smooth:
+                            extract_est = getattr(self, '_smooth_extract_est', 0)
+                            self._progress.set_description("Extracting instrumental")
+                            self._smooth_ticker.start(cumulative, extract_est)
+                        else:
+                            self._progress.update(1)
+                            self._progress.total = 3
+                            self._progress.set_description("Extracting instrumental")
 
+                    extract_start = time.time()
                     self.instrumentalFileSpec = self._create_combined_profanity_file()
 
-                    # Update progress after extraction completes
-                    if hasattr(self, '_progress') and self._progress and not self.debug:
+                    actual_extract = time.time() - extract_start
+                    if smooth:
+                        self._smooth_ticker.stop()
+                        cumulative += actual_extract
+                        self._smooth_cumulative = cumulative
+                    if hasattr(self, '_step_timings') and self._step_timings is not None:
+                        self._step_timings['extract'] = (actual_extract, getattr(self, '_timing_file_duration', 0))
+
+                    # Update progress after extraction completes (step-based mode)
+                    if not smooth and hasattr(self, '_progress') and self._progress and not self.debug:
                         self._progress.update(1)
+
                     if self.instrumentalFileSpec:
                         self.instrumentalMode = True
                         self._build_instrumental_filters()
                         return []  # Return empty list for muteTimeList
                 except Exception as e:
                     # Fallback to mute if generation fails
+                    if smooth:
+                        self._smooth_ticker.stop()
                     if self.debug:
                         mmguero.eprint(f"Generation failed: {e}, falling back to mute mode")
                     self.instrumentalMode = False
                     return self._create_mute_beep_list()
             else:
+                # No instrumental segments — remove extract estimate from smooth bar
+                if smooth and hasattr(self, '_progress') and self._progress:
+                    extract_est = getattr(self, '_smooth_extract_est', 0)
+                    self._smooth_ticker.adjust_total(-extract_est)
                 return []
+
+        else:
+            # No profanity found in auto mode — remove extract estimate if applicable
+            if smooth and hasattr(self, 'autoGenerateMode') and self.autoGenerateMode:
+                extract_est = getattr(self, '_smooth_extract_est', 0)
+                if extract_est > 0 and hasattr(self, '_progress') and self._progress:
+                    self._smooth_ticker.adjust_total(-extract_est)
 
         # Handle traditional instrumental file mode or mute/beep mode
         if self.instrumentalMode:
@@ -912,28 +1019,84 @@ class Plugger(object):
         if (self.forceDespiteTag is True) or (GetMonkeyplugTagged(self.inputFileSpec, debug=self.debug) is False):
             # Initialize progress (only when not in debug mode)
             progress = None
-            if not self.debug:
-                # Determine first action
-                if not self.inputTranscript:
-                    initial_desc = "Transcribing"
-                else:
-                    initial_desc = "Processing"
+            smooth_ticker = None
+            step_timings = None
+            timing_log = None
+            file_duration = 0.0
 
-                progress = tqdm(
-                    total=1,  # Will be updated based on actual steps
-                    desc=initial_desc,
-                    unit="step",
-                    disable=False,
-                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+            if not self.debug:
+                # Load timing log and file duration for progress estimation
+                timing_log = load_timing_log()
+                file_duration = self._get_file_duration(self.inputFileSpec)
+                step_timings = {}
+
+                # Determine which steps will run
+                will_transcribe = not self.inputTranscript
+                will_extract = hasattr(self, 'autoGenerateMode') and self.autoGenerateMode
+                # encode always runs
+
+                # Check if we have estimates for all needed steps
+                est_transcribe = estimate_step_duration(timing_log, 'transcribe', file_duration) if will_transcribe else None
+                est_extract = estimate_step_duration(timing_log, 'extract', file_duration) if will_extract else None
+                est_encode = estimate_step_duration(timing_log, 'encode', file_duration)
+
+                can_smooth = (
+                    file_duration > 0
+                    and est_encode is not None
+                    and (not will_transcribe or est_transcribe is not None)
+                    and (not will_extract or est_extract is not None)
                 )
+
+                if can_smooth:
+                    # Smooth mode: single bar with total in seconds
+                    est_transcribe_val = est_transcribe or 0
+                    est_extract_val = est_extract or 0
+                    total_est = est_transcribe_val + est_extract_val + est_encode
+
+                    initial_desc = "Transcribing" if will_transcribe else "Processing"
+                    progress = tqdm(
+                        total=total_est,
+                        desc=initial_desc,
+                        unit="s",
+                        disable=False,
+                        bar_format='{l_bar}{bar}| {n:.0f}/{total:.0f}s [{elapsed}<{remaining}]',
+                    )
+
+                    smooth_ticker = _SmoothProgressTicker(progress)
+                    # Ticker will be started inside CreateCleanMuteList for each step
+
+                    # Pass context to CreateCleanMuteList
+                    self._smooth_ticker = smooth_ticker
+                    self._smooth_cumulative = 0.0
+                    self._smooth_transcribe_est = est_transcribe_val
+                    self._smooth_extract_est = est_extract_val
+                    self._step_timings = {}
+                    self._timing_log = timing_log
+                    self._timing_file_duration = file_duration
+                    self._will_transcribe = will_transcribe
+                else:
+                    # Fallback: step-based bar (existing behavior)
+                    initial_desc = "Transcribing" if not self.inputTranscript else "Processing"
+                    progress = tqdm(
+                        total=1,
+                        desc=initial_desc,
+                        unit="step",
+                        disable=False,
+                        bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                    )
+
+                # Always pass timing context (even in step-based mode, for data collection)
+                self._step_timings = step_timings
+                self._timing_file_duration = file_duration
+                self._will_transcribe = not self.inputTranscript
 
             # Store progress reference for use in CreateCleanMuteList
             self._progress = progress
 
             self.CreateCleanMuteList()
 
-            # Update progress after CreateCleanMuteList
-            if progress:
+            # Update progress after CreateCleanMuteList (step-based mode only)
+            if progress and not smooth_ticker:
                 did_extraction = (
                     hasattr(self, 'autoGenerateMode') and
                     self.autoGenerateMode and
@@ -942,22 +1105,20 @@ class Plugger(object):
                 )
 
                 if not self.inputTranscript and not did_extraction:
-                    # Transcription done inside CreateCleanMuteList, no extraction
                     progress.update(1)
                     progress.total = 2
                     progress.set_description("Encoding")
                 elif not self.inputTranscript and did_extraction:
-                    # Both transcription and extraction handled inside CreateCleanMuteList
-                    # Just set description to encoding
                     progress.set_description("Encoding")
                 elif self.inputTranscript and did_extraction:
-                    # Extraction handled inside CreateCleanMuteList (no transcription update needed)
                     progress.total = 2
                     progress.set_description("Encoding")
                 else:
-                    # No transcription, no extraction - just encoding
                     progress.total = 1
                     progress.set_description("Encoding")
+
+            # Get cumulative position after CreateCleanMuteList (smooth mode)
+            cumulative = getattr(self, '_smooth_cumulative', 0.0) if smooth_ticker else 0
 
             # Handle instrumental mode differently
             if self.instrumentalMode:
@@ -1030,6 +1191,15 @@ class Plugger(object):
                 ffmpegCmd.extend(self.aParams)
                 ffmpegCmd.append(self.outputFileSpec)
 
+            # Start encode step with timing
+            if progress and smooth_ticker:
+                est_encode = estimate_step_duration(timing_log, 'encode', file_duration) or 0
+                progress.set_description("Encoding")
+                smooth_ticker.start(cumulative, est_encode)
+            elif progress:
+                progress.set_description("Encoding")
+            encode_start = time.time()
+
             ffmpegResult, ffmpegOutput = mmguero.run_process(ffmpegCmd, stdout=True, stderr=True, debug=self.debug)
             if (ffmpegResult != 0) or (not os.path.isfile(self.outputFileSpec)):
                 mmguero.eprint(' '.join(mmguero.flatten(ffmpegCmd)))
@@ -1037,21 +1207,43 @@ class Plugger(object):
                 mmguero.eprint(ffmpegOutput)
                 raise ValueError(f"Could not process {self.inputFileSpec}")
 
+            # Record encode timing and finalize
+            actual_encode = time.time() - encode_start
+            if smooth_ticker:
+                smooth_ticker.stop()
+            step_timings['encode'] = (actual_encode, file_duration)
+
             SetMonkeyplugTag(self.outputFileSpec, debug=self.debug)
 
-            # Complete progress
+            # Complete progress and save timing data
             if progress:
-                progress.update(1)
+                if smooth_ticker:
+                    # Snap bar to total
+                    progress.n = progress.total
+                    progress.refresh()
+                else:
+                    progress.update(1)
                 progress.close()
+
+            # Update timing log with actual measurements (only on success)
+            if timing_log is not None and file_duration > 0:
+                for op, (wall_secs, audio_secs) in step_timings.items():
+                    update_timing_measurement(timing_log, op, wall_secs, audio_secs)
+                save_timing_log(timing_log)
 
         else:
             shutil.copyfile(self.inputFileSpec, self.outputFileSpec)
             if progress:
                 progress.close()
 
-        # Clean up progress reference
+        # Clean up progress references
         if hasattr(self, '_progress'):
             delattr(self, '_progress')
+        for attr in ('_smooth_ticker', '_smooth_cumulative', '_smooth_extract_est',
+                      '_smooth_transcribe_est', '_will_transcribe',
+                      '_step_timings', '_timing_log', '_timing_file_duration'):
+            if hasattr(self, attr):
+                delattr(self, attr)
 
         return self.outputFileSpec
 
@@ -1970,6 +2162,7 @@ def expand_and_detect_vocals(input_pattern, output_pattern, args, skip_detection
 # Config file loading
 MONKEYPLUG_CACHE_DIR = os.path.join(os.path.expanduser('~'), '.cache', 'monkeyplug')
 MONKEYPLUG_CONFIG_PATH = os.path.join(MONKEYPLUG_CACHE_DIR, 'config.json')
+MONKEYPLUG_TIMING_LOG_PATH = os.path.join(MONKEYPLUG_CACHE_DIR, 'timing_log.json')
 
 DEFAULT_CONFIG = {
     "pad_milliseconds": 10,
@@ -2027,6 +2220,69 @@ def load_config_settings(debug=False):
             mmguero.eprint(f"Warning: Could not create default config: {e}")
 
     return dict(DEFAULT_CONFIG)
+
+
+###################################################################################################
+# Timing log for progress estimation
+def load_timing_log():
+    """Load historical timing data for progress bar estimation.
+
+    Returns:
+        dict: Timing log with per-operation running averages, or {} if unavailable.
+    """
+    if not os.path.isfile(MONKEYPLUG_TIMING_LOG_PATH):
+        return {}
+    try:
+        with open(MONKEYPLUG_TIMING_LOG_PATH, 'r') as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except (json.JSONDecodeError, IOError, ValueError):
+        pass
+    return {}
+
+
+def save_timing_log(timing_log):
+    """Save timing log atomically to disk."""
+    try:
+        os.makedirs(os.path.dirname(MONKEYPLUG_TIMING_LOG_PATH), exist_ok=True)
+        tmp_path = MONKEYPLUG_TIMING_LOG_PATH + '.tmp'
+        with open(tmp_path, 'w') as f:
+            json.dump(timing_log, f, indent=2)
+            f.write('\n')
+        os.replace(tmp_path, MONKEYPLUG_TIMING_LOG_PATH)
+    except (IOError, OSError):
+        pass  # Best-effort
+
+
+def estimate_step_duration(timing_log, operation, audio_seconds):
+    """Estimate wall-clock seconds for an operation based on historical data.
+
+    Returns:
+        float or None: Estimated seconds, or None if no data available.
+    """
+    entry = timing_log.get(operation)
+    if not entry or entry.get('run_count', 0) == 0:
+        return None
+    total_audio = entry.get('total_audio_seconds', 0)
+    if total_audio <= 0:
+        return None
+    rate = entry['total_wall_seconds'] / total_audio
+    return rate * audio_seconds
+
+
+def update_timing_measurement(timing_log, operation, wall_seconds, audio_seconds):
+    """Add a new timing measurement to the running averages."""
+    if operation not in timing_log:
+        timing_log[operation] = {
+            'total_audio_seconds': 0.0,
+            'total_wall_seconds': 0.0,
+            'run_count': 0,
+        }
+    entry = timing_log[operation]
+    entry['total_audio_seconds'] += audio_seconds
+    entry['total_wall_seconds'] += wall_seconds
+    entry['run_count'] += 1
 
 
 ###################################################################################################
