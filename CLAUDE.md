@@ -155,6 +155,58 @@ Automatic song identification and metadata tagging via Shazam API. Enabled by de
 - Network timeouts handled (10 second timeout for cover art download)
 - Debug mode (`-v`) shows recognition progress and errors
 
+### Album Unification (--unify-album)
+
+Unifies album metadata across all files in a folder using AI. Assigns track numbers and determines a consistent album name.
+
+**Two modes:**
+
+1. **Combined with processing**: Runs after normal audio processing completes
+   ```bash
+   monkeyplug -i "*.mp3" -o "*_clean.mp3" --unify-album
+   ```
+
+2. **Standalone**: Processes existing files without audio processing
+   ```bash
+   monkeyplug --unify-album -i /path/to/album
+   # Uses current directory if -i not specified
+   ```
+
+**What it does:**
+
+1. Reads metadata (filename, title, album) from all audio files
+2. Sends to Groq AI (gpt-oss-120b) for analysis
+3. Returns unified album name and track numbers
+4. Applies changes to all files
+
+**Implementation:**
+
+- `_read_metadata_from_files()`: Uses mutagen to extract title/album from files
+- `_unify_album_metadata()`: Groq API call with structured outputs
+- `_apply_unified_metadata()`: Writes album + track to files via mutagen
+- `_run_album_unification()`: Main orchestration function
+
+**Config settings:**
+
+- `unify_album_model`: AI model to use (default: "openai/gpt-oss-120b")
+- `unify_album_prompt`: System prompt for the AI
+
+**Requirements:**
+
+- Groq API key (same as other AI features)
+- Files must have existing metadata (title, album)
+
+**Supported formats:**
+
+- MP3: Full support (album + track number via ID3 tags)
+- Other formats: Album only (via mutagen easy mode)
+
+**Error handling:**
+
+- Graceful degradation if files have no metadata
+- Network timeouts handled with retry logic
+- Debug mode (`-v`) shows API progress and responses
+
 ### Progress Bar (tqdm)
 
 In non-verbose mode (default), a tqdm progress bar shows overall progress. Steps displayed:

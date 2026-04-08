@@ -12,6 +12,7 @@ import mmguero
 import mutagen
 import os
 import pathlib
+import glob
 import requests
 import shutil
 import string
@@ -117,6 +118,44 @@ AI_DETECT_SCHEMA = {
     "additionalProperties": False
 }
 
+UNIFY_ALBUM_PROMPT_DEFAULT = (
+    "You are a music metadata expert. Given a list of songs with their filenames, "
+    "titles, and current album names, determine the correct unified album name and "
+    "assign track numbers to each song. Consider the existing album name guesses and "
+    "song titles to infer the real album. Return track numbers in the order the songs "
+    "should appear on the album."
+)
+
+UNIFY_ALBUM_RENAME_PROMPT_DEFAULT = (
+    "You are a music file naming expert. Suggest clean, consistent filenames for each track. "
+    "Use format: 'XX - Song Name' where XX is the track number with leading zero if needed. "
+    "Keep only essential information, remove extra words like 'feat', 'explicit', etc. "
+    "Return the suggested filename WITHOUT the file extension."
+)
+
+UNIFY_ALBUM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "unified_album": {"type": "string", "description": "The unified album name"},
+        "tracks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string"},
+                    "track_number": {"type": "integer"},
+                    "album_name": {"type": "string"},
+                    "suggested_name": {"type": "string", "description": "Suggested filename without extension"}
+                },
+                "required": ["filename", "track_number", "album_name", "suggested_name"],
+                "additionalProperties": False
+            }
+        }
+    },
+    "required": ["unified_album", "tracks"],
+    "additionalProperties": False
+}
+
 ###################################################################################################
 # Determine script_path and script_name in a way that works both as module and direct execution
 try:
@@ -211,6 +250,440 @@ def SetMonkeyplugTag(local_filename, debug=False):
                 mmguero.eprint(f'Tags of {local_filename} after: {mut}')
 
     return result
+
+
+###################################################################################################
+# Read metadata from audio files for album unification
+def _read_metadata_from_files(file_paths, debug=False):
+    """Read title and album metadata from audio files using mutagen.
+
+    Args:
+        file_paths: List of audio file paths
+        debug: Enable debug output
+
+    Returns:
+        List of dicts with 'filename', 'title', 'album' keys
+    """
+    import mutagen
+    metadata_list = []
+
+    for filepath in file_paths:
+        basename = os.path.basename(filepath)
+        try:
+            mut = mutagen.File(filepath, easy=True)
+            if mut is None:
+                if debug:
+                    mmguero.eprint(f"Could not read metadata from {basename}")
+                metadata_list.append({'filename': basename, 'title': '', 'album': ''})
+                continue
+
+            # Handle different tag formats (MP3 ID3, MP4, FLAC, etc.)
+            title = ''
+            album = ''
+
+            # Try common tag keys
+            for key in ['title', 'TIT2', '\xa9nam']:  # title, ID3v2.4, MP4
+                if key in mut:
+                    value = mut[key]
+                    if isinstance(value, list):
+                        title = str(value[0]) if value else ''
+                    else:
+                        title = str(value)
+                    break
+
+            for key in ['album', 'TALB', '\xa9alb']:  # album, ID3v2.4, MP4
+                if key in mut:
+                    value = mut[key]
+                    if isinstance(value, list):
+                        album = str(value[0]) if value else ''
+                    else:
+                        album = str(value)
+                    break
+
+            metadata_list.append({
+                'filename': basename,
+                'title': title,
+                'album': album
+            })
+
+            if debug:
+                mmguero.eprint(f"{basename}: title='{title}', album='{album}'")
+
+        except Exception as e:
+            if debug:
+                mmguero.eprint(f"Error reading metadata from {basename}: {e}")
+            metadata_list.append({'filename': basename, 'title': '', 'album': ''})
+
+    return metadata_list
+
+
+###################################################################################################
+# Unify album metadata using Groq AI
+def _unify_album_metadata(file_paths, groq_api_key, model, prompt, rename_prompt=None, debug=False):
+    """Use Groq AI to unify album metadata and assign track numbers.
+
+    Args:
+        file_paths: List of audio file paths
+        groq_api_key: Groq API key for authentication
+        model: AI model name (e.g., "openai/gpt-oss-120b")
+        prompt: System prompt for the AI
+        rename_prompt: Optional prompt for renaming (if provided, adds suggested_name to response)
+        debug: Enable debug output
+
+    Returns:
+        Dict with 'unified_album' (str) and 'tracks' (list of dicts with
+        'filename', 'track_number', 'album_name', optionally 'suggested_name')
+
+    Raises:
+        ValueError: If API key is missing
+        Exception: If API call fails
+    """
+    import requests
+    import time
+
+    if not groq_api_key:
+        raise ValueError("Groq API key required for album unification")
+
+    # Read metadata from all files
+    if debug:
+        mmguero.eprint("Reading metadata from files...")
+    metadata_list = _read_metadata_from_files(file_paths, debug=debug)
+
+    # Build input for AI
+    input_text = json.dumps(metadata_list, indent=2, ensure_ascii=False)
+
+    # Build system prompt (add rename instructions if needed)
+    system_prompt = prompt
+    if rename_prompt:
+        system_prompt = f"{prompt}\n\n{rename_prompt}"
+
+    # API call with retry logic
+    max_retries = 3
+    retry_delay = 1
+
+    for attempt in range(max_retries):
+        try:
+            if debug:
+                mmguero.eprint(f"Calling Groq API (attempt {attempt + 1}/{max_retries})...")
+
+            response = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {groq_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": input_text},
+                    ],
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "album_unification",
+                            "strict": True,
+                            "schema": UNIFY_ALBUM_SCHEMA,
+                        }
+                    }
+                },
+                timeout=120,
+            )
+
+            # Handle rate limiting
+            if response.status_code == 429:
+                if attempt < max_retries - 1:
+                    if debug:
+                        mmguero.eprint(f"Rate limited, retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                raise Exception("Album unification rate limit exceeded")
+
+            if response.status_code == 401:
+                raise Exception("Invalid Groq API key for album unification")
+
+            response.raise_for_status()
+
+            result = response.json()
+            content = result.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+            parsed = json.loads(content)
+
+            if debug:
+                mmguero.eprint(f"AI unification response: {content}")
+
+            return parsed
+
+        except requests.exceptions.Timeout:
+            if attempt < max_retries - 1:
+                if debug:
+                    mmguero.eprint(f"Request timed out, retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay *= 2
+            else:
+                raise Exception("Album unification request timed out")
+
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1:
+                if debug:
+                    mmguero.eprint(f"Request failed: {e}, retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay *= 2
+            else:
+                raise Exception(f"Album unification request failed: {e}")
+
+    raise Exception("Album unification failed after maximum retries")
+
+
+###################################################################################################
+# Apply unified metadata to audio files
+def _apply_unified_metadata(file_paths, unified_result, debug=False):
+    """Apply unified album name and track numbers to audio files.
+
+    Args:
+        file_paths: List of audio file paths (order must match input)
+        unified_result: Dict from _unify_album_metadata with 'unified_album' and 'tracks'
+        debug: Enable debug output
+
+    Returns:
+        int: Number of files successfully updated
+    """
+    import mutagen
+
+    # Build lookup by filename (only need track numbers, use unified_album for all)
+    track_info = {}
+    for track in unified_result.get('tracks', []):
+        track_info[track['filename']] = track['track_number']
+
+    unified_album = unified_result.get('unified_album', '')
+    success_count = 0
+
+    for filepath in file_paths:
+        basename = os.path.basename(filepath)
+        if basename not in track_info:
+            if debug:
+                mmguero.eprint(f"Warning: No track info for {basename}")
+            continue
+
+        track_number = track_info[basename]
+
+        try:
+            ext = os.path.splitext(filepath)[1].lower()
+
+            if ext == '.mp3':
+                # MP3 with ID3 tags
+                from mutagen.mp3 import MP3
+                from mutagen.id3 import ID3, TALB, TRCK
+
+                audio = MP3(filepath)
+                if audio.tags is None:
+                    audio.tags = ID3()
+
+                # Update or add album tag (always use unified_album)
+                audio.tags.delall('TALB')
+                audio.tags.add(TALB(encoding=3, text=unified_album))
+
+                # Update or add track number tag
+                audio.tags.delall('TRCK')
+                audio.tags.add(TRCK(encoding=3, text=str(track_number)))
+
+                audio.save(v2_version=3)
+                success_count += 1
+
+                if debug:
+                    mmguero.eprint(f"Updated {basename}: album='{unified_album}', track={track_number}")
+
+            else:
+                # Other formats using easy mode
+                mut = mutagen.File(filepath, easy=True)
+                if mut is not None:
+                    if 'album' in mut:
+                        mut['album'] = unified_album
+                    if 'tracknumber' in mut:
+                        mut['tracknumber'] = str(track_number)
+
+                    mut.save()
+                    success_count += 1
+
+                    if debug:
+                        mmguero.eprint(f"Updated {basename}: album='{unified_album}', track={track_number}")
+
+        except Exception as e:
+            mmguero.eprint(f"Failed to update {basename}: {e}")
+
+    return success_count
+
+
+###################################################################################################
+# Apply smart renaming to audio files
+def _apply_renames(file_paths, unified_result, rename_prompt, debug=False):
+    """Rename files based on AI-suggested names.
+
+    Args:
+        file_paths: List of audio file paths
+        unified_result: Dict with 'tracks' containing 'filename' and 'suggested_name'
+        rename_prompt: The rename prompt that was used (None if renaming not requested)
+        debug: Enable debug output
+
+    Returns:
+        int: Number of files successfully renamed
+    """
+    import shutil
+
+    # Only rename if the flag was actually passed
+    if rename_prompt is None:
+        if debug:
+            mmguero.eprint("Rename not requested (--auto-rename not passed), skipping rename")
+        return 0
+
+    # Build lookup by filename
+    rename_map = {}
+    for track in unified_result.get('tracks', []):
+        suggested = track.get('suggested_name', '').strip()
+        if suggested:  # Only add if not empty
+            rename_map[track['filename']] = suggested
+
+    if not rename_map:
+        if debug:
+            mmguero.eprint("No suggested names provided by AI, skipping rename")
+        return 0
+
+    success_count = 0
+
+    for filepath in file_paths:
+        basename = os.path.basename(filepath)
+        if basename not in rename_map:
+            continue
+
+        suggested_name = rename_map[basename]
+
+        # Get directory and extension
+        dirname = os.path.dirname(filepath)
+        ext = os.path.splitext(filepath)[1]
+
+        # Build new filename
+        new_name = f"{suggested_name}{ext}"
+        new_path = os.path.join(dirname, new_name)
+
+        # Skip if same name
+        if new_path == filepath:
+            if debug:
+                mmguero.eprint(f"Skipping rename (same name): {basename}")
+            continue
+
+        # Check if target already exists
+        if os.path.exists(new_path):
+            mmguero.eprint(f"Cannot rename {basename} to {new_name}: target already exists")
+            continue
+
+        try:
+            shutil.move(filepath, new_path)
+            success_count += 1
+            if debug:
+                mmguero.eprint(f"Renamed: {basename} → {new_name}")
+        except Exception as e:
+            mmguero.eprint(f"Failed to rename {basename}: {e}")
+
+    return success_count
+
+
+###################################################################################################
+# Run album unification process
+def _run_album_unification(input_path, output_path, config, rename_prompt=None, debug=False):
+    """Run the album unification process on a folder of files.
+
+    Args:
+        input_path: Input file or pattern (for wildcard mode)
+        output_path: Output file or pattern (for wildcard mode)
+        config: Config dict containing unify_album_model and unify_album_prompt
+        rename_prompt: Optional prompt for smart renaming (None = no renaming)
+        debug: Enable debug output
+
+    Returns:
+        str: Status message
+    """
+    # Load Groq API key
+    try:
+        from monkeyplug.groq_config import load_groq_api_key
+    except ImportError:
+        from .groq_config import load_groq_api_key
+
+    groq_api_key = load_groq_api_key(None, debug=debug)
+    if not groq_api_key:
+        raise ValueError(
+            "Groq API key required for album unification. "
+            "Provide via --groq-api-key, GROQ_API_KEY env var, ~/.groq/config.json, or ./.groq_key"
+        )
+
+    model = config.get("unify_album_model", "openai/gpt-oss-120b")
+    prompt = config.get("unify_album_prompt", UNIFY_ALBUM_PROMPT_DEFAULT)
+
+    # Determine files to process
+    audio_extensions = ['.mp3', '.mp4', '.m4a', '.wav', '.flac', '.ogg', '.aac', '.wma']
+
+    # Check if input is a directory or wildcard pattern
+    if os.path.isdir(input_path):
+        # Standalone mode with directory
+        mmguero.eprint(f"Scanning directory: {input_path}")
+        file_paths = []
+        for ext in audio_extensions:
+            pattern = os.path.join(input_path, f'*{ext}')
+            file_paths.extend(glob.glob(pattern))
+
+        # Also check subdirectories one level deep
+        for item in os.listdir(input_path):
+            item_path = os.path.join(input_path, item)
+            if os.path.isdir(item_path):
+                for ext in audio_extensions:
+                    pattern = os.path.join(item_path, f'*{ext}')
+                    file_paths.extend(glob.glob(pattern))
+
+    elif '*' in input_path or '*' in output_path:
+        # Wildcard mode - expand and get matched files
+        file_paths = glob.glob(input_path)
+    else:
+        # Single file mode - get all audio files in same directory
+        dirname = os.path.dirname(input_path) or '.'
+        file_paths = []
+        for ext in audio_extensions:
+            pattern = os.path.join(dirname, f'*{ext}')
+            file_paths.extend(glob.glob(pattern))
+
+    if not file_paths:
+        return "No audio files found for album unification"
+
+    file_paths = sorted(file_paths)
+    mmguero.eprint(f"Found {len(file_paths)} audio files for album unification")
+
+    # Call AI to unify album metadata (and optionally get rename suggestions)
+    unified_result = _unify_album_metadata(
+        file_paths, groq_api_key, model, prompt, rename_prompt=rename_prompt, debug=debug
+    )
+
+    # Display results
+    unified_album = unified_result.get('unified_album', '')
+    mmguero.eprint(f"\nUnified Album: {unified_album}")
+    mmguero.eprint("Track Order:")
+    for track in unified_result.get('tracks', []):
+        line = f"  {track['track_number']}: {track['filename']}"
+        suggested = track.get('suggested_name', '').strip()
+        if suggested:
+            line += f" → {suggested}"
+        mmguero.eprint(line)
+
+    # Apply metadata changes
+    success_count = _apply_unified_metadata(file_paths, unified_result, debug=debug)
+
+    # Apply renames if requested
+    rename_count = _apply_renames(file_paths, unified_result, rename_prompt, debug=debug)
+
+    # Build result message
+    result = f"Album unification complete: {success_count}/{len(file_paths)} files updated"
+    if rename_prompt:
+        result += f", {rename_count} files renamed"
+
+    return result
+
 
 
 ###################################################################################################
@@ -2624,6 +3097,8 @@ DEFAULT_CONFIG = {
     "detect_mode": "list",
     "ai_detect_model": "openai/gpt-oss-20b",
     "ai_detect_prompt": AI_DETECT_PROMPT_DEFAULT,
+    "unify_album_model": "openai/gpt-oss-120b",
+    "unify_album_prompt": UNIFY_ALBUM_PROMPT_DEFAULT,
 }
 
 
@@ -2784,9 +3259,9 @@ def RunMonkeyPlug():
         dest="input",
         type=str,
         default=None,
-        required=True,
+        required=False,
         metavar="<string>",
-        help="Input file (or URL)",
+        help="Input file or folder (default: current directory for --unify-album standalone mode)",
     )
     parser.add_argument(
         "-o",
@@ -3060,6 +3535,33 @@ def RunMonkeyPlug():
     )
 
     parser.add_argument(
+        "--unify-album",
+        dest="unifyAlbum",
+        action="store_true",
+        default=False,
+        help="Unify album metadata across all files in the folder using AI",
+    )
+
+    # Custom action for --auto-rename to handle optional value
+    class AutoRenameAction(argparse.Action):
+        def __call__(self, parser, namespace, values, option_string=None):
+            if values is None:
+                setattr(namespace, self.dest, UNIFY_ALBUM_RENAME_PROMPT_DEFAULT)
+            else:
+                setattr(namespace, self.dest, values)
+
+    parser.add_argument(
+        "--auto-rename",
+        dest="autoRename",
+        action=AutoRenameAction,
+        nargs="?",
+        const=None,  # Used when flag is present but no value
+        default=None,
+        metavar="<prompt>",
+        help="Smart rename files using AI with --unify-album (optional: custom prompt for renaming)",
+    )
+
+    parser.add_argument(
         "--clean-cache",
         dest="cleanCache",
         action="store_true",
@@ -3184,6 +3686,41 @@ def RunMonkeyPlug():
         except ImportError:
             from .groq_config import load_groq_api_key
         args.groqApiKey = load_groq_api_key(None, debug=args.debug)
+
+    # Check if this is standalone --unify-album mode
+    # Standalone: only --unify-album flag, no input/output specified for processing
+    # Combined: --unify-album with input/output/wildcards for file processing
+    standalone_unify = (
+        args.unifyAlbum and
+        not args.output and  # No explicit output means not processing files
+        not (args.input and ('*' in args.input or os.path.isfile(args.input)))  # Not a file or wildcard pattern
+    )
+
+    if standalone_unify:
+        # Standalone mode: only run album unification
+        if not args.input:
+            args.input = os.getcwd()
+        args.output = None  # Not used in standalone mode
+
+        try:
+            result = _run_album_unification(
+                args.input,
+                args.output,
+                config,
+                rename_prompt=args.autoRename,
+                debug=args.debug
+            )
+            print(result)
+        except Exception as e:
+            mmguero.eprint(f"Album unification failed: {e}")
+            if args.debug:
+                import traceback
+                mmguero.eprint(traceback.format_exc())
+        return
+
+    # Require input for all other modes
+    if not args.input:
+        parser.error("-i/--input is required for this mode")
 
     # Set default output pattern if not specified: <input>_clean.<ext>
     if not args.output:
@@ -3453,6 +3990,28 @@ def RunMonkeyPlug():
 
         mmguero.eprint(f'\n✓ Completed processing {len(vocal_files)} file(s)')
         mmguero.eprint(f'Skipped {len(instrumental_files)} instrumental file(s)')
+
+    if has_wildcards and args.speechRecMode == SPEECH_REC_MODE_GROQ:
+        # Handle --unify-album flag (combined mode - runs after normal processing)
+        if args.unifyAlbum:
+            mmguero.eprint("\n" + "="*60)
+            mmguero.eprint("Running Album Unification")
+            mmguero.eprint("="*60)
+
+            try:
+                result = _run_album_unification(
+                    args.input,
+                    args.output,
+                    config,
+                    debug=args.debug
+                )
+                mmguero.eprint(result)
+            except Exception as e:
+                mmguero.eprint(f"Album unification failed: {e}")
+                if args.debug:
+                    import traceback
+                    mmguero.eprint(traceback.format_exc())
+
         sys.exit(0)
 
     # Single file mode (no wildcards or not using Groq mode)
@@ -3740,6 +4299,27 @@ def RunMonkeyPlug():
         raise ValueError(f"Unsupported speech recognition engine {args.speechRecMode}")
 
     print(plug.EncodeCleanAudio())
+
+    # Handle --unify-album flag (combined mode - runs after normal processing)
+    if args.unifyAlbum:
+        mmguero.eprint("\n" + "="*60)
+        mmguero.eprint("Running Album Unification")
+        mmguero.eprint("="*60)
+
+        try:
+            result = _run_album_unification(
+                args.input,
+                args.output,
+                config,
+                rename_prompt=args.autoRename,
+                debug=args.debug
+            )
+            mmguero.eprint(result)
+        except Exception as e:
+            mmguero.eprint(f"Album unification failed: {e}")
+            if args.debug:
+                import traceback
+                mmguero.eprint(traceback.format_exc())
 
     sys.exit(0)
 

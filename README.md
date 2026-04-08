@@ -285,6 +285,41 @@ Configurable via `~/.cache/monkeyplug/config.json`:
 }
 ```
 
+## Album Metadata Unification
+
+Unify album names and assign track numbers across a folder of songs using AI:
+
+```bash
+# Combine with normal processing
+monkeyplug -i "album/*.mp3" -o "album/*_clean.mp3" --unify-album
+
+# Standalone mode for existing files (uses current directory if -i not specified)
+monkeyplug --unify-album -i "my_album/"
+
+# Process all MP3s in current directory, then unify album metadata
+monkeyplug -i "*.mp3" -o "*_clean.mp3" --unify-album
+```
+
+The AI analyzes all songs together to determine the correct album name and track order, then updates the metadata tags in each file.
+
+**Two modes:**
+
+1. **Combined with processing**: Runs after normal audio processing completes
+2. **Standalone**: Processes existing files without audio processing (requires Groq API key)
+
+**Configurable via `~/.cache/monkeyplug/config.json`:**
+```json
+{
+  "unify_album_model": "openai/gpt-oss-120b",
+  "unify_album_prompt": "You are a music metadata expert..."
+}
+```
+
+**Requirements:**
+- Groq API key (same setup as other AI features)
+- Files must have existing metadata (title, album)
+- MP3 files get full support (album + track number via ID3 tags)
+
 ## Config File
 
 monkeyplug looks for a JSON config file in this order (first found wins):
@@ -382,6 +417,7 @@ Audio Output:
 Other:
   --force                           Process file even if already tagged
   --disable-metadata                Disable automatic metadata fetching via ShazamIO
+  --unify-album                     Unify album metadata across all files in the folder using AI
   --clean-cache                     Delete all cached data (models, config) and exit
 
 Groq Options:
