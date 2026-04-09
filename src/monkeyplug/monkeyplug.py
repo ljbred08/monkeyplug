@@ -2180,6 +2180,55 @@ class Plugger(object):
 
             self.CreateCleanMuteList()
 
+            # Fast-path: if no profanity detected and same format, just copy
+            no_profanity = len(self.naughtyWordList) == 0
+            same_format = (
+                self.inputFileParts[1].lower() == self.outputAudioFileFormat
+                if hasattr(self, 'inputFileParts')
+                else False
+            )
+
+            if no_profanity and same_format:
+                # Direct copy - no processing needed
+                copy_start = time.time()
+                shutil.copyfile(self.inputFileSpec, self.outputFileSpec)
+                copy_time = time.time() - copy_start
+
+                # Still embed metadata and tag as processed
+                self._embed_metadata(self.outputFileSpec)
+                SetMonkeyplugTag(self.outputFileSpec, debug=self.debug)
+
+                # Complete progress
+                if progress:
+                    if smooth_ticker:
+                        progress.n = progress.total
+                        progress.refresh()
+                    else:
+                        progress.update(1)
+                    progress.close()
+
+                # Record timing (treat copy as encode time)
+                if step_timings is not None and file_duration > 0:
+                    step_timings['encode'] = (copy_time, file_duration)
+                if timing_log is not None and file_duration > 0:
+                    for op, (wall_secs, audio_secs) in step_timings.items():
+                        update_timing_measurement(timing_log, op, wall_secs, audio_secs)
+                    save_timing_log(timing_log)
+
+                # Clean up progress references
+                if hasattr(self, '_progress'):
+                    delattr(self, '_progress')
+                for attr in ('_smooth_ticker', '_smooth_cumulative', '_smooth_extract_est',
+                              '_smooth_transcribe_est', '_will_transcribe',
+                              '_step_timings', '_timing_log', '_timing_file_duration'):
+                    if hasattr(self, attr):
+                        delattr(self, attr)
+
+                # Print profanity detection summary
+                self._print_words_summary()
+
+                return self.outputFileSpec
+
             # Update progress after CreateCleanMuteList (step-based mode only)
             if progress and not smooth_ticker:
                 did_extraction = (
