@@ -458,6 +458,259 @@ def _unify_album_metadata(file_paths, groq_api_key, model, prompt, rename_prompt
     raise Exception("Album unification failed after maximum retries")
 
 
+def _call_groq_api_single_batch(metadata_list, system_prompt, groq_api_key, model, batch_num=1, total_batches=1, debug=False):
+    """Make a single API call to Groq for album unification.
+
+    Args:
+        metadata_list: List of file metadata dicts to send in this batch
+        system_prompt: System prompt for the AI
+        groq_api_key: Groq API key for authentication
+        model: AI model name
+        batch_num: Current batch number (for debug output)
+        total_batches: Total expected batches (for debug output)
+        debug: Enable debug output
+
+    Returns:
+        dict: Parsed JSON response with 'unified_album' and 'tracks'
+
+    Raises:
+        Exception: If API call fails after retries
+    """
+    import requests
+    import time
+
+    # Build input for AI
+    input_text = json.dumps(metadata_list, indent=2, ensure_ascii=False)
+
+    # API call with retry logic (more retries for transient 400 JSON validation errors)
+    max_retries = 5
+    retry_delay = 1
+
+    for attempt in range(max_retries):
+        try:
+            if debug:
+                batch_info = f" (batch {batch_num}" + (f"/{total_batches}" if isinstance(total_batches, int) and total_batches > 1 else "") + ")"
+                mmguero.eprint(f"Calling Groq API{batch_info} (attempt {attempt + 1}/{max_retries})...")
+                mmguero.eprint(f"Sending {len(metadata_list)} files to AI for unification")
+
+            response = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {groq_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": input_text},
+                    ],
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "album_unification",
+                            "strict": True,
+                            "schema": UNIFY_ALBUM_SCHEMA,
+                        }
+                    }
+                },
+                timeout=120,
+            )
+
+            # Handle rate limiting
+            if response.status_code == 429:
+                if attempt < max_retries - 1:
+                    if debug:
+                        mmguero.eprint(f"Rate limited, retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                raise Exception("Album unification rate limit exceeded")
+
+            if response.status_code == 401:
+                raise Exception("Invalid Groq API key for album unification")
+
+            # Handle 400 errors (usually JSON validation failures from Groq - transient)
+            if response.status_code == 400:
+                if attempt < max_retries - 1:
+                    if debug:
+                        mmguero.eprint(f"JSON validation error (400), retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                raise Exception("Album unification failed due to JSON validation errors")
+
+            response.raise_for_status()
+
+            result = response.json()
+            content = result.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+            parsed = json.loads(content)
+
+            if debug:
+                mmguero.eprint(f"AI returned {len(parsed.get('tracks', []))} track assignments")
+
+            return parsed
+
+        except requests.exceptions.Timeout:
+            if attempt < max_retries - 1:
+                if debug:
+                    mmguero.eprint(f"Request timed out, retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay *= 2
+            else:
+                raise Exception("Album unification request timed out")
+
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1:
+                if debug:
+                    mmguero.eprint(f"Request failed: {e}, retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay *= 2
+            else:
+                raise Exception(f"Album unification request failed: {e}")
+
+    raise Exception("Album unification failed after maximum retries")
+
+
+def _unify_album_metadata_with_batching(file_paths, groq_api_key, model, prompt, rename_prompt=None, spotify_tracks=None, batch_size=10, batch_size_spotify=5, debug=False):
+    """Use Groq AI to unify album metadata with automatic batching for large file lists.
+
+    Implements automatic batching to handle Groq's output token limits.
+    If a partial response is received, automatically retries with remaining files.
+
+    Args:
+        file_paths: List of audio file paths
+        groq_api_key: Groq API key for authentication
+        model: AI model name (e.g., "openai/gpt-oss-120b")
+        prompt: System prompt for the AI
+        rename_prompt: Optional prompt for renaming (if provided, adds suggested_name to response)
+        spotify_tracks: Optional list of track names from Spotify for accurate ordering
+        debug: Enable debug output
+
+    Returns:
+        Dict with 'unified_album' (str) and 'tracks' (list of dicts with
+        'filename', 'track_number', 'album_name', optionally 'suggested_name')
+
+    Raises:
+        ValueError: If API key is missing
+        Exception: If API call fails
+    """
+    if not groq_api_key:
+        raise ValueError("Groq API key required for album unification")
+
+    # Read metadata from all files
+    if debug:
+        mmguero.eprint("Reading metadata from files...")
+    metadata_list = _read_metadata_from_files(file_paths, debug=debug)
+
+    # Build system prompt (add rename and Spotify instructions if needed)
+    system_prompt = prompt
+    if rename_prompt:
+        system_prompt = f"{prompt}\n\n{rename_prompt}"
+
+    unified_album = None  # Will be set from first batch and reused
+    all_tracks = []       # Accumulates results across batches
+    processed_files = set()  # Tracks which files we've gotten results for
+
+    # Proactive batching: limit batch size to avoid overwhelming Groq
+    # With Spotify tracks, use smaller batches since the prompt is larger
+    max_batch_size = batch_size_spotify if spotify_tracks else batch_size
+
+    # Start with first batch
+    batch_metadata = metadata_list[:max_batch_size]
+    remaining_metadata = metadata_list[max_batch_size:]
+    batch_num = 0
+
+    while batch_metadata:
+        batch_num += 1
+
+        # Build system prompt for this batch
+        # ALWAYS pass full Spotify list - don't slice it!
+        batch_system_prompt = system_prompt
+        if spotify_tracks:
+            # Add FULL Spotify track listing every time
+            tracks_json = json.dumps(spotify_tracks, ensure_ascii=False)
+            batch_system_prompt = f"{system_prompt}\n\nOfficial track listing from Spotify: {tracks_json}"
+            if debug and batch_num == 1:
+                mmguero.eprint(f"Providing full Spotify track list ({len(spotify_tracks)} tracks) - AI will match by name")
+
+        # Call API with current batch
+        try:
+            parsed = _call_groq_api_single_batch(
+                batch_metadata, batch_system_prompt, groq_api_key, model,
+                batch_num, total_batches="?", debug=debug
+            )
+        except Exception as e:
+            # If this isn't the first batch, we have partial results - fail gracefully
+            if all_tracks:
+                mmguero.eprint(f"Batch {batch_num} failed after {len(all_tracks)} tracks were processed: {e}")
+                mmguero.eprint("Proceeding with partial results...")
+                break
+            raise
+
+        # On first successful call, capture unified_album name
+        if unified_album is None and parsed.get('unified_album'):
+            unified_album = parsed['unified_album']
+
+        # For subsequent batches, override the album name to match first batch
+        if unified_album and parsed.get('unified_album') != unified_album:
+            parsed['unified_album'] = unified_album
+
+        # Add returned tracks to our collection
+        returned_tracks = parsed.get('tracks', [])
+
+        # Guard against empty response to avoid infinite loop
+        if not returned_tracks:
+            mmguero.eprint(f"WARNING: Batch {batch_num} returned no tracks. Stopping to avoid infinite loop.")
+            break
+
+        for track in returned_tracks:
+            filename = track['filename']
+            if filename not in processed_files:
+                all_tracks.append(track)
+                processed_files.add(filename)
+
+        if debug:
+            mmguero.eprint(f"Batch {batch_num} complete: {len(returned_tracks)} tracks returned, {len(all_tracks)} total processed")
+
+        # Determine what's missing from this batch
+        returned_filenames = {t['filename'] for t in returned_tracks}
+        missing_metadata = [
+            m for m in batch_metadata
+            if m['filename'] not in returned_filenames and m['filename'] not in processed_files
+        ]
+
+        if not missing_metadata and not remaining_metadata:
+            # All files processed!
+            if debug:
+                mmguero.eprint(f"All {len(all_tracks)} files processed successfully!")
+            break
+
+        # Prepare next batch: combine missing files + next chunk from remaining
+        next_batch = missing_metadata if missing_metadata else []
+        if remaining_metadata:
+            take = min(max_batch_size - len(next_batch), len(remaining_metadata))
+            next_batch.extend(remaining_metadata[:take])
+            remaining_metadata = remaining_metadata[take:]
+
+        if not next_batch:
+            break
+
+        if debug:
+            if missing_metadata:
+                new_files = len(next_batch) - len(missing_metadata)
+                mmguero.eprint(f"Partial response: {len(missing_metadata)} files from this batch need retry. Next batch: {len(missing_metadata)} retries + {new_files} new files = {len(next_batch)} total")
+            else:
+                mmguero.eprint(f"Starting batch {batch_num + 1} with {len(next_batch)} files...")
+
+        batch_metadata = next_batch
+
+    return {
+        'unified_album': unified_album or '',
+        'tracks': all_tracks
+    }
+
+
 ###################################################################################################
 # Apply unified metadata to audio files
 def _apply_unified_metadata(file_paths, unified_result, debug=False):
@@ -656,7 +909,7 @@ def _search_spotify_album(album_name, debug=False):
         from ddgs import DDGS
     except ImportError:
         if debug:
-            mmguero.eprint("duckduckgo-search not installed, skipping Spotify search")
+            mmguero.eprint("ddgs not installed, skipping Spotify search")
         return None
 
     query = f"site:spotify.com {album_name} album"
@@ -691,7 +944,7 @@ def _get_spotify_album_info(spotify_url, debug=False):
         from spotify_scraper import SpotifyClient
     except ImportError:
         if debug:
-            mmguero.eprint("spotify-scraper not installed, skipping Spotify info")
+            mmguero.eprint("spotifyscraper not installed, skipping Spotify info")
         return None
 
     try:
@@ -836,6 +1089,8 @@ def _run_album_unification(input_path, output_path, config, rename_prompt=None, 
 
     model = config.get("unify_album_model", "openai/gpt-oss-120b")
     prompt = config.get("unify_album_prompt", UNIFY_ALBUM_PROMPT_DEFAULT)
+    batch_size = config.get("unify_album_batch_size", 10)
+    batch_size_spotify = config.get("unify_album_batch_size_with_spotify", 5)
 
     # Determine files to process
     audio_extensions = ['.mp3', '.mp4', '.m4a', '.wav', '.flac', '.ogg', '.aac', '.wma']
@@ -879,8 +1134,9 @@ def _run_album_unification(input_path, output_path, config, rename_prompt=None, 
     mmguero.eprint(f"Found {len(file_paths)} audio files for album unification")
 
     # Call AI to unify album metadata (first pass - gets unified album name)
-    unified_result = _unify_album_metadata(
-        file_paths, groq_api_key, model, prompt, rename_prompt=rename_prompt, debug=debug
+    unified_result = _unify_album_metadata_with_batching(
+        file_paths, groq_api_key, model, prompt, rename_prompt=rename_prompt,
+        batch_size=batch_size, batch_size_spotify=batch_size_spotify, debug=debug
     )
 
     unified_album = unified_result.get('unified_album', '')
@@ -909,10 +1165,11 @@ def _run_album_unification(input_path, output_path, config, rename_prompt=None, 
 
             # Second AI pass with Spotify track listing for accurate ordering
             mmguero.eprint("Refining track order with Spotify data...")
-            unified_result = _unify_album_metadata(
+            unified_result = _unify_album_metadata_with_batching(
                 file_paths, groq_api_key, model, prompt,
                 rename_prompt=rename_prompt,
                 spotify_tracks=spotify_info.get('tracks', []),
+                batch_size=batch_size, batch_size_spotify=batch_size_spotify,
                 debug=debug
             )
         else:
@@ -3418,6 +3675,8 @@ DEFAULT_CONFIG = {
     "ai_detect_prompt": AI_DETECT_PROMPT_DEFAULT,
     "unify_album_model": "openai/gpt-oss-120b",
     "unify_album_prompt": UNIFY_ALBUM_PROMPT_DEFAULT,
+    "unify_album_batch_size": 10,
+    "unify_album_batch_size_with_spotify": 5,
 }
 
 # Validation rules for config values with defined options

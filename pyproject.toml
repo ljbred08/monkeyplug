@@ -29,8 +29,8 @@ dependencies = [
     "tqdm>=4.65.0",
     "shazamio>=0.8.0",
     "aiohttp>=3.9.0",
-    "duckduckgo-search>=6.0.0",
-    "spotify-scraper>=0.1.0",
+    "ddgs>=6.0.0",
+    "spotifyscraper>=0.1.0",
 ]
 
 [project.urls]

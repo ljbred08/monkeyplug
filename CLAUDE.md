@@ -16,7 +16,7 @@ pip install -e .
 
 This handles stale package cleanup and editable install. Must be run after any structural changes (new files, moved modules).
 
-### Reinstall after code changes (usually not needed with editable mode)
+### Reinstall after code changes ONLY IF USER SAYS CHANGES AREN'T SHOWING UP
 
 ```bash
 pip install -e . --no-deps --force-reinstall
@@ -65,7 +65,9 @@ All classes live in `src/monkeyplug/monkeyplug.py`. The base `Plugger` class han
 ### Key Data Flow
 
 1. **Transcription**: Groq API (or Whisper/Vosk) produces `wordList` - a list of dicts with `word`, `start`, `end`, `conf`, `scrub` keys
+
 2. **Profanity detection**: `naughtyWordList` = words where `scrub=True`, checked against `swearsMap` loaded from built-in JSON + optional custom file
+
 3. **Segment creation**: Three modes determined by `CreateCleanMuteList()`:
    
    - **Mute/Beep**: `_create_mute_beep_list()` builds FFmpeg volume/filter chains
@@ -162,11 +164,13 @@ Unifies album metadata across all files in a folder using AI. Assigns track numb
 **Two modes:**
 
 1. **Combined with processing**: Runs after normal audio processing completes
+   
    ```bash
    monkeyplug -i "*.mp3" -o "*_clean.mp3" --unify-album
    ```
 
 2. **Standalone**: Processes existing files without audio processing
+   
    ```bash
    monkeyplug --unify-album -i /path/to/album
    # Uses current directory if -i not specified
@@ -226,38 +230,46 @@ monkeyplug -i "album/*.mp3" -o "album/*_clean.mp3" --unify-album --use-spotify -
 ```
 
 **How it works:**
+
 1. AI determines unified album name from file metadata
 2. **If Spotify URL provided**: Uses that URL directly
 3. **If no URL provided (`--use-spotify` only)**: Searches Spotify for the album using DuckDuckGo
 4. Gets official album info from Spotify:
+   
    - Cover art URLs (prefers 640x640 or higher)
+   
    - Official track listing
 5. Second AI call matches local files to Spotify tracks for accurate ordering
 6. Downloads and applies official cover art to all files
 7. Applies unified album name and track numbers
 
 **Benefits:**
+
 - Consistent, high-quality cover art across all tracks
 - Accurate track ordering based on official Spotify listing
 - Two-pass AI approach ensures best results
 
 **Implementation:**
+
 - `_search_spotify_album()`: Uses DDGS to find Spotify album URL
 - `_get_spotify_album_info()`: Uses spotify_scraper to fetch album data
 - `_download_cover_art()`: Downloads image bytes from URL
 - `_apply_cover_art_to_files()`: Embeds APIC tag (cover art) into MP3s
 
 **Requirements:**
+
 - `--unify-album` flag must be used
 - Internet connection for Spotify access
-- `duckduckgo-search` and `spotify-scraper` packages installed
+- `ddgs` and `spotifyscraper` packages installed
 
 **Error handling:**
+
 - Spotify search fails: Continues with AI-only unification (logged)
 - Spotify scraper fails: Continues with AI-only unification (logged)
 - Cover art download fails: Skips cover art, still applies metadata (logged)
 
 **Supported formats:**
+
 - MP3: Full support (cover art via APIC tag)
 - Other formats: Cover art not applied (metadata only)
 
