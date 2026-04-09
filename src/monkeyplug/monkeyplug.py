@@ -123,7 +123,9 @@ UNIFY_ALBUM_PROMPT_DEFAULT = (
     "titles, and current album names, determine the correct unified album name and "
     "assign track numbers to each song. Consider the existing album name guesses and "
     "song titles to infer the real album. Return track numbers in the order the songs "
-    "should appear on the album."
+    "should appear on the album. "
+    "CRITICAL: You MUST return a track entry for EVERY input file - do not skip any files. "
+    "The tracks array must contain exactly the same number of entries as the input."
 )
 
 UNIFY_ALBUM_RENAME_PROMPT_DEFAULT = (
@@ -139,6 +141,7 @@ UNIFY_ALBUM_SCHEMA = {
         "unified_album": {"type": "string", "description": "The unified album name"},
         "tracks": {
             "type": "array",
+            "description": "MUST contain one entry for EACH input file - no files may be omitted",
             "items": {
                 "type": "object",
                 "properties": {
