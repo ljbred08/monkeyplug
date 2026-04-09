@@ -3803,6 +3803,14 @@ def RunMonkeyPlug():
         help=f"Delete all cached data (models, config) at {MONKEYPLUG_CACHE_DIR} and exit",
     )
 
+    parser.add_argument(
+        "--clear-outputs",
+        dest="clearOutputs",
+        action="store_true",
+        default=False,
+        help="Delete all files matching the output glob pattern (-o) and exit",
+    )
+
     voskArgGroup = parser.add_argument_group('VOSK Options')
     voskArgGroup.add_argument(
         "--vosk-model-dir",
@@ -3880,6 +3888,40 @@ def RunMonkeyPlug():
             print(f"Deleted cache directory: {MONKEYPLUG_CACHE_DIR}")
         else:
             print(f"No cache directory found at: {MONKEYPLUG_CACHE_DIR}")
+        return
+
+    # Handle --clear-outputs early and exit
+    if args.clearOutputs:
+        import glob as glob_module
+        if not args.output:
+            mmguero.eprint("Error: --clear-outputs requires -o/--output with a glob pattern")
+            mmguero.eprint("Example: monkeyplug --clear-outputs -o \"*_clean.mp3\"")
+            sys.exit(1)
+        # Expand the glob pattern
+        matching_files = glob_module.glob(args.output, recursive=True)
+        if not matching_files:
+            print(f"No files found matching pattern: {args.output}")
+            return
+        # List files
+        print(f"Found {len(matching_files)} file(s) matching pattern \"{args.output}\":")
+        for f in sorted(matching_files):
+            print(f"  {f}")
+        # Prompt for confirmation
+        response = input("\nDelete these files? [y/N]: ").strip().lower()
+        if response in ('y', 'yes'):
+            deleted = 0
+            failed = 0
+            for f in matching_files:
+                try:
+                    os.remove(f)
+                    deleted += 1
+                    print(f"Deleted: {f}")
+                except OSError as e:
+                    failed += 1
+                    mmguero.eprint(f"Failed to delete {f}: {e}")
+            print(f"\nDone: {deleted} deleted, {failed} failed")
+        else:
+            print("Cancelled - no files deleted")
         return
 
     # Set debug flag based on verbose level for backward compatibility
