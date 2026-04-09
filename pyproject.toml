@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "monkeyplug-enhanced"
-version = "2.3.1"
+version = "2.3.2"
 authors = [
-  { name="Seth Grover", email="mero.mero.guero@gmail.com" },
   { name="Lincoln Brown", email="link@brown.fm" },
+  { name="Seth Grover", email="mero.mero.guero@gmail.com" },
 ]
 description = "Enhanced fork of monkeyplug — censors profanity in audio files using speech recognition with Groq API, AI instrumental generation, and batch processing."
 readme = "README.md"

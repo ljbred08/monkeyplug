@@ -458,7 +458,7 @@ def _unify_album_metadata(file_paths, groq_api_key, model, prompt, rename_prompt
     raise Exception("Album unification failed after maximum retries")
 
 
-def _call_groq_api_single_batch(metadata_list, system_prompt, groq_api_key, model, batch_num=1, total_batches=1, debug=False):
+def _call_groq_api_single_batch(metadata_list, system_prompt, groq_api_key, model, batch_num=1, total_batches=1, debug=False, progress_bar=None, batch_start_position=0.0, batch_slice_size=1.0, timing_log=None, operation_name='unify_batch_groq'):
     """Make a single API call to Groq for album unification.
 
     Args:
@@ -469,6 +469,11 @@ def _call_groq_api_single_batch(metadata_list, system_prompt, groq_api_key, mode
         batch_num: Current batch number (for debug output)
         total_batches: Total expected batches (for debug output)
         debug: Enable debug output
+        progress_bar: Optional tqdm progress bar for progress tracking
+        batch_start_position: Starting position (0.0 to 1.0) for this batch in overall progress
+        batch_slice_size: Size of this batch's slice (0.0 to 1.0) of overall progress
+        timing_log: Timing log dict for estimation
+        operation_name: Name of operation for timing tracking ('unify_batch_groq' or 'unify_batch_spotify')
 
     Returns:
         dict: Parsed JSON response with 'unified_album' and 'tracks'
@@ -482,9 +487,16 @@ def _call_groq_api_single_batch(metadata_list, system_prompt, groq_api_key, mode
     # Build input for AI
     input_text = json.dumps(metadata_list, indent=2, ensure_ascii=False)
 
+    # Estimate tokens for this batch
+    batch_tokens = _estimate_batch_tokens(metadata_list, system_prompt)
+
+    # Estimate duration based on historical data
+    batch_estimated = estimate_step_duration_tokens(timing_log, operation_name, batch_tokens) or batch_tokens * 0.1
+
     # API call with retry logic (more retries for transient 400 JSON validation errors)
     max_retries = 5
     retry_delay = 1
+    smooth_ticker = None
 
     for attempt in range(max_retries):
         try:
@@ -493,6 +505,22 @@ def _call_groq_api_single_batch(metadata_list, system_prompt, groq_api_key, mode
                 mmguero.eprint(f"Calling Groq API{batch_info} (attempt {attempt + 1}/{max_retries})...")
                 mmguero.eprint(f"Sending {len(metadata_list)} files to AI for unification")
 
+            # Start smooth progress ticker for this batch
+            if progress_bar:
+                # Reset to batch start position on retry
+                if attempt > 0:
+                    progress_bar.n = batch_start_position * progress_bar.total
+                    progress_bar.refresh()
+
+                if smooth_ticker is None:
+                    smooth_ticker = _SmoothProgressTicker(progress_bar)
+
+                smooth_ticker.start(
+                    cumulative=batch_start_position * progress_bar.total,
+                    step_estimated_seconds=batch_estimated
+                )
+
+            api_start = time.time()
             response = requests.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={
@@ -516,6 +544,19 @@ def _call_groq_api_single_batch(metadata_list, system_prompt, groq_api_key, mode
                 },
                 timeout=120,
             )
+            api_elapsed = time.time() - api_start
+
+            # Stop ticker and get actual time
+            if smooth_ticker:
+                actual_time = smooth_ticker.stop()
+                # Snap to actual batch end position
+                progress_bar.n = (batch_start_position + batch_slice_size) * progress_bar.total
+                progress_bar.refresh()
+
+                # Record timing
+                if timing_log is not None:
+                    update_timing_measurement_tokens(timing_log, operation_name, actual_time, batch_tokens)
+                    save_timing_log(timing_log)
 
             # Handle rate limiting
             if response.status_code == 429:
@@ -552,6 +593,8 @@ def _call_groq_api_single_batch(metadata_list, system_prompt, groq_api_key, mode
             return parsed
 
         except requests.exceptions.Timeout:
+            if smooth_ticker:
+                smooth_ticker.stop()
             if attempt < max_retries - 1:
                 if debug:
                     mmguero.eprint(f"Request timed out, retrying in {retry_delay}s...")
@@ -561,6 +604,8 @@ def _call_groq_api_single_batch(metadata_list, system_prompt, groq_api_key, mode
                 raise Exception("Album unification request timed out")
 
         except requests.exceptions.RequestException as e:
+            if smooth_ticker:
+                smooth_ticker.stop()
             if attempt < max_retries - 1:
                 if debug:
                     mmguero.eprint(f"Request failed: {e}, retrying in {retry_delay}s...")
@@ -572,7 +617,7 @@ def _call_groq_api_single_batch(metadata_list, system_prompt, groq_api_key, mode
     raise Exception("Album unification failed after maximum retries")
 
 
-def _unify_album_metadata_with_batching(file_paths, groq_api_key, model, prompt, rename_prompt=None, spotify_tracks=None, batch_size=10, batch_size_spotify=5, debug=False):
+def _unify_album_metadata_with_batching(file_paths, groq_api_key, model, prompt, rename_prompt=None, spotify_tracks=None, batch_size=10, batch_size_spotify=5, debug=False, verbose=False):
     """Use Groq AI to unify album metadata with automatic batching for large file lists.
 
     Implements automatic batching to handle Groq's output token limits.
@@ -585,7 +630,10 @@ def _unify_album_metadata_with_batching(file_paths, groq_api_key, model, prompt,
         prompt: System prompt for the AI
         rename_prompt: Optional prompt for renaming (if provided, adds suggested_name to response)
         spotify_tracks: Optional list of track names from Spotify for accurate ordering
+        batch_size: Default batch size (without Spotify)
+        batch_size_spotify: Batch size when using Spotify (smaller due to larger prompts)
         debug: Enable debug output
+        verbose: Disable progress bar if True
 
     Returns:
         Dict with 'unified_album' (str) and 'tracks' (list of dicts with
@@ -608,21 +656,58 @@ def _unify_album_metadata_with_batching(file_paths, groq_api_key, model, prompt,
     if rename_prompt:
         system_prompt = f"{prompt}\n\n{rename_prompt}"
 
-    unified_album = None  # Will be set from first batch and reused
-    all_tracks = []       # Accumulates results across batches
-    processed_files = set()  # Tracks which files we've gotten results for
+    # Determine operation name for timing
+    operation_name = 'unify_batch_spotify' if spotify_tracks else 'unify_batch_groq'
 
     # Proactive batching: limit batch size to avoid overwhelming Groq
     # With Spotify tracks, use smaller batches since the prompt is larger
     max_batch_size = batch_size_spotify if spotify_tracks else batch_size
 
+    # Calculate expected batch count
+    expected_batches = (len(metadata_list) + max_batch_size - 1) // max_batch_size
+
+    # Guard against empty metadata list
+    if expected_batches == 0:
+        return {'unified_album': '', 'tracks': []}
+
+    # Estimate total tokens for all batches
+    total_tokens = 0
+    for i in range(expected_batches):
+        batch_metadata = metadata_list[i * max_batch_size : (i + 1) * max_batch_size]
+        batch_system_prompt = system_prompt
+        if spotify_tracks:
+            tracks_json = json.dumps(spotify_tracks, ensure_ascii=False)
+            batch_system_prompt = f"{system_prompt}\n\nOfficial track listing from Spotify: {tracks_json}"
+        total_tokens += _estimate_batch_tokens(batch_metadata, batch_system_prompt)
+
+    # Load timing log and estimate total duration
+    timing_log = load_timing_log()
+    total_estimated = estimate_step_duration_tokens(timing_log, operation_name, total_tokens) or total_tokens * 0.1
+
+    # Create progress bar
+    progress = None
+    if not verbose:
+        progress = tqdm(
+            total=total_estimated,
+            desc=f"Unifying Album ({expected_batches} batches)",
+            unit="s",
+            disable=False,
+            bar_format='{l_bar}{bar}| {n:.0f}/{total:.0f}s [{elapsed}<{remaining}]',
+        )
+
+    unified_album = None  # Will be set from first batch and reused
+    all_tracks = []       # Accumulates results across batches
+    processed_files = set()  # Tracks which files we've gotten results for
+
     # Start with first batch
     batch_metadata = metadata_list[:max_batch_size]
     remaining_metadata = metadata_list[max_batch_size:]
     batch_num = 0
+    actual_batch_num = 0  # Track actual batch attempts (including retries)
 
     while batch_metadata:
         batch_num += 1
+        actual_batch_num += 1
 
         # Build system prompt for this batch
         # ALWAYS pass full Spotify list - don't slice it!
@@ -634,18 +719,35 @@ def _unify_album_metadata_with_batching(file_paths, groq_api_key, model, prompt,
             if debug and batch_num == 1:
                 mmguero.eprint(f"Providing full Spotify track list ({len(spotify_tracks)} tracks) - AI will match by name")
 
+        # Calculate batch slice size and start position
+        batch_slice_size = 1.0 / expected_batches
+        # Clamp batch number for progress calculation to handle retries
+        progress_batch_num = min(actual_batch_num - 1, expected_batches - 1)
+        batch_start_position = progress_batch_num * batch_slice_size
+
+        # Update progress bar description
+        if progress:
+            display_batch_num = min(actual_batch_num, expected_batches)
+            progress.set_description(f"Processing Batch {display_batch_num}/{expected_batches}")
+
         # Call API with current batch
         try:
             parsed = _call_groq_api_single_batch(
                 batch_metadata, batch_system_prompt, groq_api_key, model,
-                batch_num, total_batches="?", debug=debug
+                actual_batch_num, expected_batches, debug=debug,
+                progress_bar=progress, batch_start_position=batch_start_position,
+                batch_slice_size=batch_slice_size, timing_log=timing_log,
+                operation_name=operation_name
             )
         except Exception as e:
             # If this isn't the first batch, we have partial results - fail gracefully
             if all_tracks:
-                mmguero.eprint(f"Batch {batch_num} failed after {len(all_tracks)} tracks were processed: {e}")
+                mmguero.eprint(f"Batch {actual_batch_num} failed after {len(all_tracks)} tracks were processed: {e}")
                 mmguero.eprint("Proceeding with partial results...")
                 break
+            # Close progress bar before raising
+            if progress:
+                progress.close()
             raise
 
         # On first successful call, capture unified_album name
@@ -661,7 +763,7 @@ def _unify_album_metadata_with_batching(file_paths, groq_api_key, model, prompt,
 
         # Guard against empty response to avoid infinite loop
         if not returned_tracks:
-            mmguero.eprint(f"WARNING: Batch {batch_num} returned no tracks. Stopping to avoid infinite loop.")
+            mmguero.eprint(f"WARNING: Batch {actual_batch_num} returned no tracks. Stopping to avoid infinite loop.")
             break
 
         for track in returned_tracks:
@@ -671,7 +773,7 @@ def _unify_album_metadata_with_batching(file_paths, groq_api_key, model, prompt,
                 processed_files.add(filename)
 
         if debug:
-            mmguero.eprint(f"Batch {batch_num} complete: {len(returned_tracks)} tracks returned, {len(all_tracks)} total processed")
+            mmguero.eprint(f"Batch {actual_batch_num} complete: {len(returned_tracks)} tracks returned, {len(all_tracks)} total processed")
 
         # Determine what's missing from this batch
         returned_filenames = {t['filename'] for t in returned_tracks}
@@ -701,9 +803,13 @@ def _unify_album_metadata_with_batching(file_paths, groq_api_key, model, prompt,
                 new_files = len(next_batch) - len(missing_metadata)
                 mmguero.eprint(f"Partial response: {len(missing_metadata)} files from this batch need retry. Next batch: {len(missing_metadata)} retries + {new_files} new files = {len(next_batch)} total")
             else:
-                mmguero.eprint(f"Starting batch {batch_num + 1} with {len(next_batch)} files...")
+                mmguero.eprint(f"Starting batch {actual_batch_num + 1} with {len(next_batch)} files...")
 
         batch_metadata = next_batch
+
+    # Close progress bar
+    if progress:
+        progress.close()
 
     return {
         'unified_album': unified_album or '',
@@ -1061,7 +1167,7 @@ def _apply_cover_art_to_files(file_paths, image_data, debug=False):
 
 ###################################################################################################
 # Run album unification process
-def _run_album_unification(input_path, output_path, config, rename_prompt=None, use_spotify=None, debug=False):
+def _run_album_unification(input_path, output_path, config, rename_prompt=None, use_spotify=None, debug=False, verbose=False):
     """Run the album unification process on a folder of files.
 
     Args:
@@ -1071,6 +1177,7 @@ def _run_album_unification(input_path, output_path, config, rename_prompt=None, 
         rename_prompt: Optional prompt for smart renaming (None = no renaming)
         use_spotify: Spotify URL if provided, True to search for album, None/False to disable
         debug: Enable debug output
+        verbose: Disable progress bar if True
 
     Returns:
         str: Status message
@@ -1137,7 +1244,7 @@ def _run_album_unification(input_path, output_path, config, rename_prompt=None, 
     # Call AI to unify album metadata (first pass - gets unified album name)
     unified_result = _unify_album_metadata_with_batching(
         file_paths, groq_api_key, model, prompt, rename_prompt=rename_prompt,
-        batch_size=batch_size, batch_size_spotify=batch_size_spotify, debug=debug
+        batch_size=batch_size, batch_size_spotify=batch_size_spotify, debug=debug, verbose=verbose
     )
 
     unified_album = unified_result.get('unified_album', '')
@@ -1171,7 +1278,7 @@ def _run_album_unification(input_path, output_path, config, rename_prompt=None, 
                 rename_prompt=rename_prompt,
                 spotify_tracks=spotify_info.get('tracks', []),
                 batch_size=batch_size, batch_size_spotify=batch_size_spotify,
-                debug=debug
+                debug=debug, verbose=verbose
             )
         else:
             mmguero.eprint("Could not fetch Spotify info, using AI results only")
@@ -3837,6 +3944,80 @@ def update_timing_measurement(timing_log, operation, wall_seconds, audio_seconds
     entry['run_count'] += 1
 
 
+def estimate_step_duration_tokens(timing_log, operation, input_tokens):
+    """Estimate wall-clock seconds for an operation based on token-based historical data.
+
+    Args:
+        timing_log: Timing log dict
+        operation: Operation name (e.g., 'unify_batch_groq')
+        input_tokens: Estimated input tokens
+
+    Returns:
+        float or None: Estimated seconds, or None if no data available.
+    """
+    entry = timing_log.get(operation)
+    if not entry or entry.get('run_count', 0) == 0:
+        return None
+    total_tokens = entry.get('total_input_tokens', 0)
+    if total_tokens <= 0:
+        return None
+    rate = entry['total_wall_seconds'] / total_tokens
+    return rate * input_tokens
+
+
+def update_timing_measurement_tokens(timing_log, operation, wall_seconds, input_tokens):
+    """Add a new token-based timing measurement to the running averages.
+
+    Args:
+        timing_log: Timing log dict
+        operation: Operation name
+        wall_seconds: Actual wall-clock seconds elapsed
+        input_tokens: Actual input tokens processed
+    """
+    if operation not in timing_log:
+        timing_log[operation] = {
+            'total_input_tokens': 0,
+            'total_wall_seconds': 0.0,
+            'run_count': 0,
+        }
+    entry = timing_log[operation]
+    entry['total_input_tokens'] += input_tokens
+    entry['total_wall_seconds'] += wall_seconds
+    entry['run_count'] += 1
+
+
+def _estimate_input_tokens(text):
+    """Estimate input token count using character approximation.
+
+    Args:
+        text: String to estimate tokens for
+
+    Returns:
+        int: Estimated token count (approximately characters / 4)
+    """
+    return len(text) // 4
+
+
+def _estimate_batch_tokens(metadata_list, system_prompt):
+    """Estimate total input tokens for a batch request.
+
+    Args:
+        metadata_list: List of metadata dicts
+        system_prompt: System prompt string
+
+    Returns:
+        int: Estimated input tokens
+    """
+    # Count tokens in metadata
+    metadata_json = json.dumps(metadata_list, indent=2, ensure_ascii=False)
+    metadata_tokens = _estimate_input_tokens(metadata_json)
+
+    # Count tokens in system prompt
+    prompt_tokens = _estimate_input_tokens(system_prompt)
+
+    return metadata_tokens + prompt_tokens
+
+
 ###################################################################################################
 # RunMonkeyPlug
 def RunMonkeyPlug():
@@ -4384,7 +4565,8 @@ def RunMonkeyPlug():
                 config,
                 rename_prompt=args.autoRename,
                 use_spotify=args.useSpotify,
-                debug=args.debug
+                debug=args.debug,
+                verbose=args.debug
             )
             print(result)
         except Exception as e:
@@ -4681,7 +4863,8 @@ def RunMonkeyPlug():
                     config,
                     rename_prompt=args.autoRename,
                     use_spotify=args.useSpotify,
-                    debug=args.debug
+                    debug=args.debug,
+                    verbose=args.debug
                 )
                 mmguero.eprint(result)
             except Exception as e:
@@ -4991,7 +5174,8 @@ def RunMonkeyPlug():
                 config,
                 rename_prompt=args.autoRename,
                 use_spotify=args.useSpotify,
-                debug=args.debug
+                debug=args.debug,
+                verbose=args.debug
             )
             mmguero.eprint(result)
         except Exception as e:
