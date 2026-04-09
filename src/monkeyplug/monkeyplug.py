@@ -877,10 +877,11 @@ def _apply_renames(file_paths, unified_result, rename_prompt, debug=False):
                 mmguero.eprint(f"Skipping rename (same name): {basename}")
             continue
 
-        # Check if target already exists
+        # Check if target already exists - remove it so we can rename/overwrite
         if os.path.exists(new_path):
-            mmguero.eprint(f"Cannot rename {basename} to {new_name}: target already exists")
-            continue
+            if debug:
+                mmguero.eprint(f"Removing existing file {new_name} to allow rename")
+            os.remove(new_path)
 
         try:
             shutil.move(filepath, new_path)
@@ -2486,18 +2487,27 @@ class Plugger(object):
             # Fast-path: if no profanity detected and same format, just copy
             no_profanity = len(self.naughtyWordList) == 0
             same_format = (
-                self.inputFileParts[1].lower() == self.outputAudioFileFormat
+                self.inputFileParts[1].lower().lstrip('.') == self.outputAudioFileFormat
                 if hasattr(self, 'inputFileParts')
                 else False
             )
 
             if no_profanity and same_format:
                 # Direct copy - no processing needed
+                if self.debug:
+                    mmguero.eprint("No profanity detected and same format - using direct copy")
+
+                # Update progress bar description to reflect copy operation
+                if progress:
+                    progress.set_description("Copying")
+
                 copy_start = time.time()
                 shutil.copyfile(self.inputFileSpec, self.outputFileSpec)
                 copy_time = time.time() - copy_start
 
                 # Still embed metadata and tag as processed
+                if self.debug:
+                    mmguero.eprint("Embedding Shazam metadata into copied file...")
                 self._embed_metadata(self.outputFileSpec)
                 SetMonkeyplugTag(self.outputFileSpec, debug=self.debug)
 
@@ -2510,9 +2520,10 @@ class Plugger(object):
                         progress.update(1)
                     progress.close()
 
-                # Record timing (treat copy as encode time)
+                # Record timing separately for copy (don't skew encode estimates)
+                # Copy is much faster than encode, so we track it separately
                 if step_timings is not None and file_duration > 0:
-                    step_timings['encode'] = (copy_time, file_duration)
+                    step_timings['copy'] = (copy_time, file_duration)
                 if timing_log is not None and file_duration > 0:
                     for op, (wall_secs, audio_secs) in step_timings.items():
                         update_timing_measurement(timing_log, op, wall_secs, audio_secs)
