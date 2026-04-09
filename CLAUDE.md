@@ -207,6 +207,60 @@ Unifies album metadata across all files in a folder using AI. Assigns track numb
 - Network timeouts handled with retry logic
 - Debug mode (`-v`) shows API progress and responses
 
+#### Spotify Integration (--use-spotify)
+
+When used with `--unify-album`, fetches official cover art and track listings from Spotify for accurate results:
+
+```bash
+# Get official cover art and accurate track ordering
+monkeyplug --unify-album --use-spotify
+
+# With direct Spotify URL (skip search)
+monkeyplug --unify-album --use-spotify "https://open.spotify.com/album/1kCHru7uhxBUdzkm4gzRQc"
+
+# Combined with processing
+monkeyplug -i "*.mp3" -o "*_clean.mp3" --unify-album --use-spotify
+
+# Full workflow with renaming
+monkeyplug -i "album/*.mp3" -o "album/*_clean.mp3" --unify-album --use-spotify --auto-rename
+```
+
+**How it works:**
+1. AI determines unified album name from file metadata
+2. **If Spotify URL provided**: Uses that URL directly
+3. **If no URL provided (`--use-spotify` only)**: Searches Spotify for the album using DuckDuckGo
+4. Gets official album info from Spotify:
+   - Cover art URLs (prefers 640x640 or higher)
+   - Official track listing
+5. Second AI call matches local files to Spotify tracks for accurate ordering
+6. Downloads and applies official cover art to all files
+7. Applies unified album name and track numbers
+
+**Benefits:**
+- Consistent, high-quality cover art across all tracks
+- Accurate track ordering based on official Spotify listing
+- Two-pass AI approach ensures best results
+
+**Implementation:**
+- `_search_spotify_album()`: Uses DDGS to find Spotify album URL
+- `_get_spotify_album_info()`: Uses spotify_scraper to fetch album data
+- `_download_cover_art()`: Downloads image bytes from URL
+- `_apply_cover_art_to_files()`: Embeds APIC tag (cover art) into MP3s
+
+**Requirements:**
+- `--unify-album` flag must be used
+- Internet connection for Spotify access
+- `duckduckgo-search` and `spotify-scraper` packages installed
+
+**Error handling:**
+- Spotify search fails: Continues with AI-only unification (logged)
+- Spotify scraper fails: Continues with AI-only unification (logged)
+- Cover art download fails: Skips cover art, still applies metadata (logged)
+
+**Supported formats:**
+- MP3: Full support (cover art via APIC tag)
+- Other formats: Cover art not applied (metadata only)
+
 ### Progress Bar (tqdm)
 
 In non-verbose mode (default), a tqdm progress bar shows overall progress. Steps displayed:

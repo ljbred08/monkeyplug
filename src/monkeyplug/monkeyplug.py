@@ -319,7 +319,7 @@ def _read_metadata_from_files(file_paths, debug=False):
 
 ###################################################################################################
 # Unify album metadata using Groq AI
-def _unify_album_metadata(file_paths, groq_api_key, model, prompt, rename_prompt=None, debug=False):
+def _unify_album_metadata(file_paths, groq_api_key, model, prompt, rename_prompt=None, spotify_tracks=None, debug=False):
     """Use Groq AI to unify album metadata and assign track numbers.
 
     Args:
@@ -328,6 +328,7 @@ def _unify_album_metadata(file_paths, groq_api_key, model, prompt, rename_prompt
         model: AI model name (e.g., "openai/gpt-oss-120b")
         prompt: System prompt for the AI
         rename_prompt: Optional prompt for renaming (if provided, adds suggested_name to response)
+        spotify_tracks: Optional list of track names from Spotify for accurate ordering
         debug: Enable debug output
 
     Returns:
@@ -352,10 +353,16 @@ def _unify_album_metadata(file_paths, groq_api_key, model, prompt, rename_prompt
     # Build input for AI
     input_text = json.dumps(metadata_list, indent=2, ensure_ascii=False)
 
-    # Build system prompt (add rename instructions if needed)
+    # Build system prompt (add rename and Spotify instructions if needed)
     system_prompt = prompt
     if rename_prompt:
         system_prompt = f"{prompt}\n\n{rename_prompt}"
+    if spotify_tracks:
+        # Add Spotify track listing to guide accurate ordering
+        tracks_json = json.dumps(spotify_tracks, ensure_ascii=False)
+        system_prompt = f"{system_prompt}\n\nOfficial track listing from Spotify: {tracks_json}"
+        if debug:
+            mmguero.eprint(f"Provided {len(spotify_tracks)} Spotify tracks for accurate ordering")
 
     # API call with retry logic
     max_retries = 3
@@ -588,8 +595,173 @@ def _apply_renames(file_paths, unified_result, rename_prompt, debug=False):
 
 
 ###################################################################################################
+# Spotify integration for album art and track listings
+def _search_spotify_album(album_name, debug=False):
+    """Search for Spotify album URL using DuckDuckGo.
+
+    Args:
+        album_name: The album name to search for
+        debug: Enable debug output
+
+    Returns:
+        str: Spotify album URL or None if not found
+    """
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        if debug:
+            mmguero.eprint("duckduckgo-search not installed, skipping Spotify search")
+        return None
+
+    query = f"site:spotify.com {album_name} album"
+
+    try:
+        with DDGS() as ddgs:
+            results = ddgs.text(query, max_results=1)
+            for result in results:
+                url = result.get('href', '')
+                if url and 'spotify.com/albu' in url:
+                    if debug:
+                        mmguero.eprint(f"Found Spotify album: {url}")
+                    return url
+    except Exception as e:
+        if debug:
+            mmguero.eprint(f"Spotify search failed: {e}")
+
+    return None
+
+
+def _get_spotify_album_info(spotify_url, debug=False):
+    """Get album info from Spotify including cover art and track listing.
+
+    Args:
+        spotify_url: Spotify album URL
+        debug: Enable debug output
+
+    Returns:
+        dict: {'images': [urls], 'tracks': [track names]} or None if failed
+    """
+    try:
+        from spotify_scraper import SpotifyClient
+    except ImportError:
+        if debug:
+            mmguero.eprint("spotify-scraper not installed, skipping Spotify info")
+        return None
+
+    try:
+        client = SpotifyClient()
+        album = client.get_album_info(spotify_url)
+
+        # Extract cover art URLs (prefer 640x640)
+        images = []
+        for img in album.get('images', []):
+            if img.get('width', 0) >= 640:
+                images.append(img['url'])
+
+        # Fallback to any image
+        if not images and album.get('images'):
+            images.append(album['images'][0]['url'])
+
+        # Extract track names
+        tracks = []
+        for track in album.get('tracks', []):
+            track_name = track.get('name', '')
+            if track_name:
+                tracks.append(track_name)
+
+        if debug:
+            mmguero.eprint(f"Spotify album: {album.get('name', 'Unknown')}")
+            mmguero.eprint(f"  Found {len(tracks)} tracks, {len(images)} cover art images")
+
+        return {'images': images, 'tracks': tracks}
+
+    except Exception as e:
+        if debug:
+            mmguero.eprint(f"Failed to get Spotify album info: {e}")
+        return None
+
+
+def _download_cover_art(image_url, debug=False):
+    """Download cover art image from URL.
+
+    Args:
+        image_url: URL of the cover art image
+        debug: Enable debug output
+
+    Returns:
+        bytes: Image data or None if failed
+    """
+    try:
+        response = requests.get(image_url, timeout=10)
+        if response.status_code == 200:
+            if debug:
+                mmguero.eprint(f"Downloaded cover art: {len(response.content)} bytes")
+            return response.content
+        else:
+            if debug:
+                mmguero.eprint(f"Failed to download cover art: HTTP {response.status_code}")
+    except Exception as e:
+        if debug:
+            mmguero.eprint(f"Failed to download cover art: {e}")
+
+    return None
+
+
+def _apply_cover_art_to_files(file_paths, image_data, debug=False):
+    """Apply cover art to all audio files.
+
+    Args:
+        file_paths: List of audio file paths
+        image_data: Image bytes to embed as cover art
+        debug: Enable debug output
+
+    Returns:
+        int: Number of files successfully updated
+    """
+    import mutagen
+
+    success_count = 0
+
+    for filepath in file_paths:
+        try:
+            ext = os.path.splitext(filepath)[1].lower()
+
+            if ext == '.mp3':
+                # MP3 with ID3 tags
+                from mutagen.mp3 import MP3
+                from mutagen.id3 import ID3, APIC
+
+                audio = MP3(filepath)
+                if audio.tags is None:
+                    audio.tags = ID3()
+
+                # Remove existing cover art
+                audio.tags.delall('APIC')
+
+                # Add new cover art
+                audio.tags.add(APIC(
+                    encoding=3,
+                    mime='image/jpeg',
+                    type=3,  # 3 = cover front
+                    desc='Cover',
+                    data=image_data
+                ))
+
+                audio.save(v2_version=3)
+                success_count += 1
+
+                if debug:
+                    mmguero.eprint(f"Applied cover art: {os.path.basename(filepath)}")
+
+        except Exception as e:
+            mmguero.eprint(f"Failed to apply cover art to {os.path.basename(filepath)}: {e}")
+
+    return success_count
+
+
+###################################################################################################
 # Run album unification process
-def _run_album_unification(input_path, output_path, config, rename_prompt=None, debug=False):
+def _run_album_unification(input_path, output_path, config, rename_prompt=None, use_spotify=None, debug=False):
     """Run the album unification process on a folder of files.
 
     Args:
@@ -597,6 +769,7 @@ def _run_album_unification(input_path, output_path, config, rename_prompt=None, 
         output_path: Output file or pattern (for wildcard mode)
         config: Config dict containing unify_album_model and unify_album_prompt
         rename_prompt: Optional prompt for smart renaming (None = no renaming)
+        use_spotify: Spotify URL if provided, True to search for album, None/False to disable
         debug: Enable debug output
 
     Returns:
@@ -640,7 +813,11 @@ def _run_album_unification(input_path, output_path, config, rename_prompt=None, 
 
     elif '*' in input_path or '*' in output_path:
         # Wildcard mode - expand and get matched files
-        file_paths = glob.glob(input_path)
+        # In combined mode (processing files), only unify the output files, not the originals
+        if '*' in output_path and output_path:
+            file_paths = glob.glob(output_path)
+        else:
+            file_paths = glob.glob(input_path)
     else:
         # Single file mode - get all audio files in same directory
         dirname = os.path.dirname(input_path) or '.'
@@ -655,10 +832,45 @@ def _run_album_unification(input_path, output_path, config, rename_prompt=None, 
     file_paths = sorted(file_paths)
     mmguero.eprint(f"Found {len(file_paths)} audio files for album unification")
 
-    # Call AI to unify album metadata (and optionally get rename suggestions)
+    # Call AI to unify album metadata (first pass - gets unified album name)
     unified_result = _unify_album_metadata(
         file_paths, groq_api_key, model, prompt, rename_prompt=rename_prompt, debug=debug
     )
+
+    unified_album = unified_result.get('unified_album', '')
+    spotify_info = None  # Will hold Spotify data if fetched
+
+    # If Spotify integration requested, look up official album info
+    if use_spotify and unified_album:
+        mmguero.eprint("\nSearching Spotify for album info...")
+
+        # Determine Spotify URL (provided directly or search for it)
+        if isinstance(use_spotify, str) and use_spotify.startswith('https://'):
+            # User provided direct Spotify URL
+            spotify_url = use_spotify
+            if debug:
+                mmguero.eprint(f"Using provided Spotify URL: {spotify_url}")
+        else:
+            # Search for Spotify album URL
+            spotify_url = _search_spotify_album(unified_album, debug=debug)
+
+        if spotify_url:
+            # Get Spotify album info (cover art + track listing)
+            spotify_info = _get_spotify_album_info(spotify_url, debug=debug)
+
+        if spotify_info:
+            mmguero.eprint(f"Found Spotify album with {len(spotify_info.get('tracks', []))} tracks")
+
+            # Second AI pass with Spotify track listing for accurate ordering
+            mmguero.eprint("Refining track order with Spotify data...")
+            unified_result = _unify_album_metadata(
+                file_paths, groq_api_key, model, prompt,
+                rename_prompt=rename_prompt,
+                spotify_tracks=spotify_info.get('tracks', []),
+                debug=debug
+            )
+        else:
+            mmguero.eprint("Could not fetch Spotify info, using AI results only")
 
     # Display results
     unified_album = unified_result.get('unified_album', '')
@@ -674,11 +886,23 @@ def _run_album_unification(input_path, output_path, config, rename_prompt=None, 
     # Apply metadata changes
     success_count = _apply_unified_metadata(file_paths, unified_result, debug=debug)
 
+    # Apply Spotify cover art if available
+    cover_art_count = 0
+    if use_spotify and spotify_info and spotify_info.get('images'):
+        # Download first available cover art (prefer highest resolution)
+        for image_url in spotify_info['images'][:1]:
+            image_data = _download_cover_art(image_url, debug=debug)
+            if image_data:
+                cover_art_count = _apply_cover_art_to_files(file_paths, image_data, debug=debug)
+                break
+
     # Apply renames if requested
     rename_count = _apply_renames(file_paths, unified_result, rename_prompt, debug=debug)
 
     # Build result message
     result = f"Album unification complete: {success_count}/{len(file_paths)} files updated"
+    if cover_art_count > 0:
+        result += f", {cover_art_count} files updated with cover art"
     if rename_prompt:
         result += f", {rename_count} files renamed"
 
@@ -3562,6 +3786,16 @@ def RunMonkeyPlug():
     )
 
     parser.add_argument(
+        "--use-spotify",
+        dest="useSpotify",
+        nargs="?",
+        const=True,  # Used when flag is present but no value
+        default=None,
+        metavar="<url>",
+        help="Use Spotify to get official cover art and track listing with --unify-album (optional: direct Spotify URL)",
+    )
+
+    parser.add_argument(
         "--clean-cache",
         dest="cleanCache",
         action="store_true",
@@ -3708,6 +3942,7 @@ def RunMonkeyPlug():
                 args.output,
                 config,
                 rename_prompt=args.autoRename,
+                use_spotify=args.useSpotify,
                 debug=args.debug
             )
             print(result)
@@ -4003,6 +4238,8 @@ def RunMonkeyPlug():
                     args.input,
                     args.output,
                     config,
+                    rename_prompt=args.autoRename,
+                    use_spotify=args.useSpotify,
                     debug=args.debug
                 )
                 mmguero.eprint(result)
@@ -4312,6 +4549,7 @@ def RunMonkeyPlug():
                 args.output,
                 config,
                 rename_prompt=args.autoRename,
+                use_spotify=args.useSpotify,
                 debug=args.debug
             )
             mmguero.eprint(result)

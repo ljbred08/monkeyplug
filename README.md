@@ -287,25 +287,38 @@ Configurable via `~/.cache/monkeyplug/config.json`:
 
 ## Album Metadata Unification
 
-Unify album names and assign track numbers across a folder of songs using AI:
+Unify album names, cover art, and assign track numbers across a folder of songs using AI:
 
 ```bash
+# Basic AI unification
+monkeyplug --unify-album
+
+# With Spotify integration (recommended for best results)
+monkeyplug --unify-album --use-spotify
+
+# With direct Spotify URL (skip search)
+monkeyplug --unify-album --use-spotify "https://open.spotify.com/album/1kCHru7uhxBUdzkm4gzRQc"
+
 # Combine with normal processing
 monkeyplug -i "album/*.mp3" -o "album/*_clean.mp3" --unify-album
 
-# Standalone mode for existing files (uses current directory if -i not specified)
-monkeyplug --unify-album -i "my_album/"
-
-# Process all MP3s in current directory, then unify album metadata
-monkeyplug -i "*.mp3" -o "*_clean.mp3" --unify-album
+# Full workflow with Spotify and smart renaming
+monkeyplug -i "album/*.mp3" -o "album/*_clean.mp3" --unify-album --use-spotify --auto-rename
 ```
 
-The AI analyzes all songs together to determine the correct album name and track order, then updates the metadata tags in each file.
+The AI analyzes all songs together to determine the correct album name and track order. With `--use-spotify`, it fetches official cover art and track listings from Spotify for accurate results.
 
 **Two modes:**
 
 1. **Combined with processing**: Runs after normal audio processing completes
 2. **Standalone**: Processes existing files without audio processing (requires Groq API key)
+
+**Spotify Integration (--use-spotify):**
+- Provide a direct Spotify URL to skip the search step
+- Or let it search automatically for the album
+- Downloads official cover art (640x640)
+- Gets official track listing for accurate ordering
+- Applies consistent cover art to all tracks
 
 **Configurable via `~/.cache/monkeyplug/config.json`:**
 ```json
@@ -318,7 +331,7 @@ The AI analyzes all songs together to determine the correct album name and track
 **Requirements:**
 - Groq API key (same setup as other AI features)
 - Files must have existing metadata (title, album)
-- MP3 files get full support (album + track number via ID3 tags)
+- MP3 files get full support (album + track number + cover art via ID3 tags)
 
 ## Config File
 
