@@ -132,6 +132,8 @@ UNIFY_ALBUM_RENAME_PROMPT_DEFAULT = (
     "You are a music file naming expert. Suggest clean, consistent filenames for each track. "
     "Use format: 'XX - Song Name' where XX is the track number with leading zero if needed. "
     "Keep only essential information, remove extra words like 'feat', 'explicit', etc. "
+    "IMPORTANT: Never use these invalid characters in filenames: < > : \" / \\ | ? * "
+    "Replace punctuation marks like ? with nothing or - (hyphen). "
     "Return the suggested filename WITHOUT the file extension."
 )
 
@@ -422,6 +424,17 @@ def _unify_album_metadata(file_paths, groq_api_key, model, prompt, rename_prompt
             if debug:
                 mmguero.eprint(f"AI unification response: {content}")
 
+            # Validate that we got results for all files
+            returned_tracks = parsed.get('tracks', [])
+            if len(returned_tracks) < len(metadata_list):
+                missing = len(metadata_list) - len(returned_tracks)
+                mmguero.eprint(f"WARNING: AI only returned {len(returned_tracks)} of {len(metadata_list)} track assignments.")
+                mmguero.eprint(f"This is likely due to Groq's output token limit. {missing} files were not processed.")
+                if spotify_tracks:
+                    mmguero.eprint("Try running again without --use-spotify, or process files in smaller batches.")
+                else:
+                    mmguero.eprint("Try processing files in smaller batches (e.g., split into subdirectories).")
+
             return parsed
 
         except requests.exceptions.Timeout:
@@ -526,6 +539,35 @@ def _apply_unified_metadata(file_paths, unified_result, debug=False):
 
 ###################################################################################################
 # Apply smart renaming to audio files
+def _sanitize_filename(filename, debug=False):
+    r"""Sanitize filename for Windows compatibility.
+
+    Removes/replaces characters that are invalid on Windows:
+    < > : " / \ | ? *
+
+    Args:
+        filename: The filename to sanitize (without extension)
+        debug: Enable debug output
+
+    Returns:
+        str: Sanitized filename
+    """
+    # Windows invalid characters: < > : " / \ | ? *
+    invalid_chars = ['<', '>', ':', '"', '/', '\\', '|', '?', '*']
+    sanitized = filename
+
+    for char in invalid_chars:
+        sanitized = sanitized.replace(char, '')
+
+    # Also handle leading/trailing spaces and dots
+    sanitized = sanitized.strip('. ')
+
+    if debug and sanitized != filename:
+        mmguero.eprint(f"Sanitized filename: '{filename}' → '{sanitized}'")
+
+    return sanitized
+
+
 def _apply_renames(file_paths, unified_result, rename_prompt, debug=False):
     """Rename files based on AI-suggested names.
 
@@ -571,8 +613,9 @@ def _apply_renames(file_paths, unified_result, rename_prompt, debug=False):
         dirname = os.path.dirname(filepath)
         ext = os.path.splitext(filepath)[1]
 
-        # Build new filename
-        new_name = f"{suggested_name}{ext}"
+        # Build new filename (sanitize for Windows compatibility)
+        sanitized_name = _sanitize_filename(suggested_name, debug=debug)
+        new_name = f"{sanitized_name}{ext}"
         new_path = os.path.join(dirname, new_name)
 
         # Skip if same name
@@ -3377,6 +3420,38 @@ DEFAULT_CONFIG = {
     "unify_album_prompt": UNIFY_ALBUM_PROMPT_DEFAULT,
 }
 
+# Validation rules for config values with defined options
+CONFIG_VALIDATION = {
+    "show_words": {"choices": ["full", "clean", "none"], "default": "clean"},
+    "detect_mode": {"choices": ["list", "ai", "both"], "default": "list"},
+}
+
+
+def validate_config_settings(config, debug=False):
+    """
+    Validate config settings and fix invalid values.
+
+    For each config key that has defined choices, validates the value.
+    If invalid, prints a warning and uses the default value.
+
+    Args:
+        config: dict - Config settings to validate
+        debug: bool - Enable debug output
+
+    Returns:
+        dict: Validated config with invalid values replaced by defaults
+    """
+    validated = dict(config)
+    for key, rules in CONFIG_VALIDATION.items():
+        if key in validated:
+            value = validated[key]
+            choices = rules["choices"]
+            if value not in choices:
+                default = rules["default"]
+                mmguero.eprint(f"WARNING: CONFIG \"{key}\" SET TO INVALID VALUE \"{value}\". USING DEFAULT \"{default}\".")
+                validated[key] = default
+    return validated
+
 
 def load_config_settings(debug=False):
     """
@@ -3406,7 +3481,8 @@ def load_config_settings(debug=False):
                 if debug:
                     mmguero.eprint(f"Loaded config from: {config_path}")
 
-                return config
+                # Validate and fix any invalid config values
+                return validate_config_settings(config, debug=debug)
             except (json.JSONDecodeError, IOError) as e:
                 if debug:
                     mmguero.eprint(f"Warning: Failed to load config from {config_path}: {e}")
@@ -3424,6 +3500,7 @@ def load_config_settings(debug=False):
         if debug:
             mmguero.eprint(f"Warning: Could not create default config: {e}")
 
+    # Return a copy of DEFAULT_CONFIG (already validated)
     return dict(DEFAULT_CONFIG)
 
 
