@@ -241,7 +241,8 @@ monkeyplug -i song.mp3 -o song_clean.mp3 --disable-metadata
 **Notes:**
 - Requires internet connection for Shazam recognition
 - Cover art embedding is supported for MP3 files
-- If recognition fails, the file is still processed (no error)
+- If the metadata lookup fails, monkeyplug prints one warning and still censors the audio
+- Metadata tagging needs Python 3.12 or 3.13: `shazamio` pins `shazamio-core` 1.1.2, which has no wheels for Python 3.14 and newer. On newer Pythons tagging is skipped with a warning - use `--disable-metadata` to skip the step silently
 - Metadata can be viewed in any music player or with `ffprobe`
 
 ## Show Profanity Output
