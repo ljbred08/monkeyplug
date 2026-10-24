@@ -1452,7 +1452,7 @@ class Plugger(object):
     # for instrumental splicing
     instrumentalFileSpec = ""
     instrumentalMode = False
-    # metadata problems (broken/unsupported shazamio, failed lookups) are reported once
+    # Shared across files; reset at the start of RunMonkeyPlug.
     _metadataWarningShown = False
     instrumentalSegments = []  # List of (start, end) tuples for profanity sections
 
@@ -1510,7 +1510,6 @@ class Plugger(object):
         self.aiDetectPrompt = aiDetectPrompt
         self.disableMetadata = disableMetadata
         self.shazamMetadata = {}
-        self._metadataWarningShown = False
 
         # determine input file name, or download and save file
         if (iFileSpec is not None) and os.path.isfile(iFileSpec):
@@ -2117,9 +2116,9 @@ class Plugger(object):
         unsupported shazamio install used to abort the whole run before any audio was
         processed, producing no output file and no error message.
         """
-        if self._metadataWarningShown:
+        if Plugger._metadataWarningShown:
             return
-        self._metadataWarningShown = True
+        Plugger._metadataWarningShown = True
         mmguero.eprint(f'Warning: {message}')
 
     def _fetch_shazam_metadata(self):
@@ -4060,6 +4059,7 @@ def _estimate_batch_tokens(metadata_list, system_prompt):
 ###################################################################################################
 # RunMonkeyPlug
 def RunMonkeyPlug():
+    Plugger._metadataWarningShown = False
 
     package_name = __package__ or "monkeyplug"
     try:
