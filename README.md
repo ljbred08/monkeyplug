@@ -171,6 +171,8 @@ Reverse mode needs both stems from AI separation, so `--reverse` implies `--inst
 
 The reversed vocal is mixed at its original level (`amix=inputs=2:normalize=0`), so the instrumental and vocal stems still add up to the level of the untouched song.
 
+A reversed word starts on whatever sample the original word ended on, so dropping it in raw steps the signal at both window edges — audible as a click. The vocal is therefore ramped in and out over 10 ms (`afade`), which leaves the instrumental and the timeline untouched. A crossfade (`acrossfade`) would be the wrong tool here: it shortens the output by the overlap at every join, drifting the track out of sync by a fraction of a second over an album.
+
 ## Wildcard / Batch Mode
 
 Process multiple files at once using `*` wildcards:

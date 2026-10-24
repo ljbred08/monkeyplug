@@ -119,13 +119,37 @@ class TestReverseModeFilters:
 
         # instrumental portion of the profanity window
         assert "[1:a]atrim=1.00:3.00,asetpts=PTS-STARTPTS[inst1]" in filters
-        # same window of the vocal stem, reversed
-        assert "[2:a]atrim=1.00:3.00,asetpts=PTS-STARTPTS,areverse[vox1]" in filters
+        # same window of the vocal stem, reversed, and ramped at both edges
+        assert (
+            "[2:a]atrim=1.00:3.00,asetpts=PTS-STARTPTS,areverse,"
+            "afade=t=in:st=0:d=0.010,afade=t=out:st=1.990:d=0.010[vox1]"
+        ) in filters
         # both dropped back in together, unnormalised so the stems keep their levels
         assert "[inst1][vox1]amix=inputs=2:normalize=0[seg1]" in filters
         # the mixed segment still feeds the concat, so the timeline is unchanged
         assert "concat=n=3" in filters
         assert "[seg0][seg1][seg2]concat" in filters
+
+    def test_vocal_envelope_does_not_change_the_timeline(self):
+        # afade shapes the vocal in place; it must not consume the window the way
+        # acrossfade would, or every swear word would shorten the track slightly
+        filters = self.reverse_filters()
+
+        assert "acrossfade" not in filters
+        # the window is still a full two seconds, 1.00 -> 3.00
+        assert "[1:a]atrim=1.00:3.00" in filters
+        # fades sit strictly inside the window: in at 0, out finishing at 2.00
+        assert ",afade=t=out:st=1.990:d=0.010[vox1]" in filters
+
+    def test_vocal_envelope_shrinks_for_very_short_windows(self):
+        # a window shorter than two fade lengths must not get overlapping ramps
+        filters = MockPlugger(
+            [(10.0, 10.01)], duration=60.0, autoGenerateMode=True,
+            segMapping=[(10.0, 10.01, 0.0, 0.01, 9.0, 10.0)],
+            reverseMode=True, vocalsFileSpec="/tmp/combined_vocals.wav",
+        ).filters()
+
+        assert "areverse,afade=t=in:st=0:d=0.005,afade=t=out:st=0.005:d=0.005[vox1]" in filters
 
     def test_no_vocal_stem_falls_back_to_instrumental_only(self):
         # without a separated vocal stem (e.g. separation returned only one path)
@@ -263,6 +287,27 @@ class TestReverseModeAudio:
         source_early = _rms(_slice(forward_vox, rate, 1.05, 1.45))
         source_late = _rms(_slice(forward_vox, rate, 1.55, 1.95))
         assert source_early < source_late
+
+    @requires_ffmpeg
+    def test_vocal_edges_are_ramped_not_stepped(self, tmp_path):
+        n = int(self.DURATION * self.RATE)
+        # silent instrumental, flat vocal: spliced in raw, the window steps
+        # straight up to 0.5 from whatever the 440 Hz track happened to hold
+        inst = np.zeros(n)
+        vox = np.full(n, 0.5)
+
+        samples, rate = _render(tmp_path, self._filters(tmp_path), inst, vox)
+
+        # steepest single-sample jump around both window edges
+        edges = np.concatenate([
+            _slice(samples, rate, 1.99, 2.02),
+            _slice(samples, rate, 2.98, 3.01),
+        ])
+        steepest = float(np.max(np.abs(np.diff(edges))))
+
+        # the 440 Hz track's own slope is ~0.031 per sample at 44.1 kHz; a hard
+        # splice adds a step of up to the vocal's full 0.5
+        assert steepest < 0.06, f"window edge still steps by {steepest:.3f}"
 
 
 class _StubSeparator:

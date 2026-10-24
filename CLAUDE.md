@@ -111,7 +111,8 @@ Plays the censored words backwards under the instrumental instead of removing th
 **Implementation:**
 
 - `_create_combined_profanity_file()` stores the separated vocal stem in `self.vocalsFileSpec`
-- `_build_instrumental_filters()` emits `[1:a]atrim=...[instN]`, `[2:a]atrim=...,areverse[voxN]` and `[instN][voxN]amix=inputs=2:normalize=0[segN]`
+- `_build_instrumental_filters()` emits `[1:a]atrim=...[instN]`, `[2:a]atrim=...,areverse,afade=t=in...,afade=t=out...[voxN]` and `[instN][voxN]amix=inputs=2:normalize=0[segN]`
+- The reversed vocal is ramped in/out over `REVERSE_FADE_SECONDS` (10 ms) so the window edges don't click. `afade` with both `st` and `d` given shapes the vocal in place; `acrossfade` must not be used, as it consumes the overlap from the timeline (every swear word would shorten the track and drift it out of sync). The fade is capped at half the window for very short segments
 - `EncodeCleanAudio()` adds the vocal stem as a third ffmpeg input (`-i`) so `[2:a]` resolves
 - `reverseMode` is a `Plugger` attribute (default `False`), settable with `--reverse` or the `reverse_mode` config key
 - `areverse` buffers each window in memory; fine at profanity-segment length, and the mixing is unnormalised so the stems keep their levels
@@ -314,7 +315,7 @@ Uses timing data from `~/.cache/monkeyplug/timing_log.json` for smooth estimatio
 
 - **Traditional instrumental**: `[0:a]` for the song and `[1:a]` for the supplied instrumental, `atrim` each range then `concat` (never `asplit` `[0:a]` - that splices the original back into itself)
 - **Auto-separation**: `[0:a]` for original, `[1:a]` for combined instrumental, `atrim` + `concat`
-- **Reverse mode**: `[1:a]` instrumental stem + `[2:a]` vocal stem through `areverse`, joined with `amix=inputs=2:normalize=0`, then `atrim` + `concat`
+- **Reverse mode**: `[1:a]` instrumental stem + `[2:a]` vocal stem through `areverse` and a 10 ms `afade` envelope, joined with `amix=inputs=2:normalize=0`, then `atrim` + `concat`
 - **Mute**: `afade` volume filters with `enable='between(t,start,end)'`, 5ms fade edges
 - **Beep**: `volume=0` mute + `sine` generator + `amix`
 

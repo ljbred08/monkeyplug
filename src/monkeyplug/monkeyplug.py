@@ -72,6 +72,8 @@ BEEP_MIX_NORMALIZE_DEFAULT = False
 BEEP_AUDIO_WEIGHT_DEFAULT = 1
 BEEP_SINE_WEIGHT_DEFAULT = 1
 BEEP_DROPOUT_TRANSITION_DEFAULT = 0
+# reverse mode: fade the reversed vocal in/out at each window edge (seconds)
+REVERSE_FADE_SECONDS = 0.010
 SWEARS_FILENAME_DEFAULT = 'swears.txt'
 MUTAGEN_METADATA_TAGS = ['encodedby', 'comment']
 MUTAGEN_METADATA_TAG_VALUE = u'monkeyplug'
@@ -2496,12 +2498,30 @@ class Plugger(object):
                 if self.reverseMode and self.vocalsFileSpec:
                     # REVERSE MODE: drop the instrumental and the vocal stem, the
                     # latter reversed, into the censored window so the word stays
-                    # audible but unintelligible
+                    # audible but unintelligible.
+                    #
+                    # The reversed word starts on whatever sample the original one
+                    # ended on, so mixing it in raw steps the signal at both window
+                    # edges - an audible click. Ramp the vocal branch in and out
+                    # over a few ms instead. afade with st AND d set shapes only the
+                    # vocal and leaves the timeline alone; acrossfade would shorten
+                    # the track by the overlap at every join and drift out of sync.
+                    window_start = round(position_in_combined, 2)
+                    window_end = round(profanity_end_in_combined, 2)
+                    window_duration = max(window_end - window_start, 0.0)
+                    fade = min(REVERSE_FADE_SECONDS, window_duration / 2.0)
+                    vocal_fade = (
+                        f",afade=t=in:st=0:d={fade:.3f}"
+                        f",afade=t=out:st={window_duration - fade:.3f}:d={fade:.3f}"
+                        if fade > 0
+                        else ""
+                    )
+
                     filter_parts.append(
-                        f"[1:a]atrim={position_in_combined:.2f}:{profanity_end_in_combined:.2f},asetpts=PTS-STARTPTS[inst{seg_index}]"
+                        f"[1:a]atrim={window_start:.2f}:{window_end:.2f},asetpts=PTS-STARTPTS[inst{seg_index}]"
                     )
                     filter_parts.append(
-                        f"[2:a]atrim={position_in_combined:.2f}:{profanity_end_in_combined:.2f},asetpts=PTS-STARTPTS,areverse[vox{seg_index}]"
+                        f"[2:a]atrim={window_start:.2f}:{window_end:.2f},asetpts=PTS-STARTPTS,areverse{vocal_fade}[vox{seg_index}]"
                     )
                     filter_parts.append(
                         f"[inst{seg_index}][vox{seg_index}]amix=inputs=2:normalize=0[seg{seg_index}]"
