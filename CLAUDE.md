@@ -153,7 +153,9 @@ Automatic song identification and metadata tagging via Shazam API. Enabled by de
 
 **Error handling:**
 
-- Graceful degradation if Shazam recognition fails (no error, just no metadata)
+- Graceful degradation if Shazam recognition fails: the audio is still censored
+- The `shazamio` import is guarded. A broken or unsupported install degrades to no metadata and logs a single `Warning:` line via `_metadata_warning()`, never a silent abort before any audio is processed. In wildcard batches the warning is printed once per run (`Plugger._metadataWarningShown`, shared across instances and reset when `RunMonkeyPlug()` starts)
+- `shazamio` pins `shazamio-core==1.1.2`, which publishes wheels only up to cp313 (plus an sdist that needs Rust). On Python 3.14+ the import therefore fails, tagging is skipped, and the warning points at Python 3.12/3.13 or `--disable-metadata`
 - Network timeouts handled (10 second timeout for cover art download)
 - Debug mode (`-v`) shows recognition progress and errors
 

@@ -1452,6 +1452,8 @@ class Plugger(object):
     # for instrumental splicing
     instrumentalFileSpec = ""
     instrumentalMode = False
+    # Shared across files; reset at the start of RunMonkeyPlug.
+    _metadataWarningShown = False
     instrumentalSegments = []  # List of (start, end) tuples for profanity sections
 
     ######## init #################################################################
@@ -2107,6 +2109,18 @@ class Plugger(object):
             word = "word" if count == 1 else "words"
             mmguero.eprint(f"{count} {word} detected")
 
+    def _metadata_warning(self, message):
+        """Report a metadata problem once per run.
+
+        Metadata tagging is best-effort, but it must never fail silently: a broken or
+        unsupported shazamio install used to abort the whole run before any audio was
+        processed, producing no output file and no error message.
+        """
+        if Plugger._metadataWarningShown:
+            return
+        Plugger._metadataWarningShown = True
+        mmguero.eprint(f'Warning: {message}')
+
     def _fetch_shazam_metadata(self):
         """Fetch song metadata from ShazamIO.
 
@@ -2116,8 +2130,24 @@ class Plugger(object):
         if self.disableMetadata:
             return {}
 
-        import asyncio
-        from shazamio import Shazam
+        # Importing shazamio (and its native shazamio-core dependency) can fail on
+        # Python versions the package publishes no wheels for. That must degrade to
+        # "no metadata" instead of killing the run, so keep the import guarded.
+        try:
+            import asyncio
+            from shazamio import Shazam
+        except Exception as e:
+            self._metadata_warning(
+                f'automatic Shazam metadata tagging is unavailable on this Python '
+                f'({sys.version.split()[0]}): the shazamio dependency could not be imported ({e}). '
+                f'shazamio pins shazamio-core 1.1.2, which has no wheels for Python 3.14 '
+                f'and newer, so this is expected on the latest Python releases. The audio '
+                f'will still be censored, but the title/artist/album/cover art tags will be '
+                f'skipped. To get metadata tagging, run monkeyplug with Python 3.12 or 3.13; '
+                f'to skip metadata tagging altogether and silence this warning, pass '
+                f'--disable-metadata.'
+            )
+            return {}
 
         async def recognize():
             try:
@@ -2169,6 +2199,10 @@ class Plugger(object):
             except Exception as e:
                 if self.debug:
                     mmguero.eprint(f"ShazamIO recognition failed: {e}")
+                self._metadata_warning(
+                    f'Shazam metadata lookup failed ({e}); continuing without metadata. '
+                    f'Pass --disable-metadata to skip metadata tagging entirely.'
+                )
                 return {}
 
         try:
@@ -2176,6 +2210,10 @@ class Plugger(object):
         except Exception as e:
             if self.debug:
                 mmguero.eprint(f"ShazamIO async error: {e}")
+            self._metadata_warning(
+                f'Shazam metadata lookup failed ({e}); continuing without metadata. '
+                f'Pass --disable-metadata to skip metadata tagging entirely.'
+            )
             return {}
 
     def _embed_metadata(self, output_file):
@@ -4020,6 +4058,7 @@ def _estimate_batch_tokens(metadata_list, system_prompt):
 ###################################################################################################
 # RunMonkeyPlug
 def RunMonkeyPlug():
+    Plugger._metadataWarningShown = False
 
     package_name = __package__ or "monkeyplug"
     try:
