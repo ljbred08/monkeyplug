@@ -72,7 +72,7 @@ All classes live in `src/monkeyplug/monkeyplug.py`. The base `Plugger` class han
    
    - **Mute/Beep**: `_create_mute_beep_list()` builds FFmpeg volume/filter chains
    
-   - **Traditional instrumental**: User provides full instrumental file, `_build_instrumental_filters()` uses `asplit` to reference both streams
+   - **Traditional instrumental**: User provides a full instrumental file (second ffmpeg input, `[1:a]`); `_build_instrumental_filters()` trims `[0:a]` around each profanity range and drops the `[1:a]` range in its place
    
    - **Auto-separation**: `_create_combined_profanity_file()` extracts profanity segments with padding into one combined WAV, runs through sherpa-onnx `SourceSeparator`, then `_build_instrumental_filters()` splices the AI-generated instrumental back in
 
@@ -289,7 +289,7 @@ Uses timing data from `~/.cache/monkeyplug/timing_log.json` for smooth estimatio
 
 ### FFmpeg Patterns
 
-- **Traditional instrumental**: `[0:a]asplit=2[orig][inst]` then `atrim` from each stream + `concat`
+- **Traditional instrumental**: `[0:a]` for the song and `[1:a]` for the supplied instrumental, `atrim` each range then `concat` (never `asplit` `[0:a]` - that splices the original back into itself)
 - **Auto-separation**: `[0:a]` for original, `[1:a]` for combined instrumental, `atrim` + `concat`
 - **Mute**: `afade` volume filters with `enable='between(t,start,end)'`, 5ms fade edges
 - **Beep**: `volume=0` mute + `sine` generator + `amix`

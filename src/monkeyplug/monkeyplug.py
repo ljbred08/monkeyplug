@@ -2463,34 +2463,33 @@ class Plugger(object):
             filter_parts.append(f"{concat_input}concat=n={seg_index}:v=0:a=1[outa]")
 
         else:
-            # TRADITIONAL MODE: Use provided instrumental file
-            # Original logic works fine here
-            filter_parts.append("[0:a]asplit=2[orig][inst]")
-
-            seg_index = 0
-            last_end = 0.0
-
+            # TRADITIONAL MODE: splice the supplied instrumental file in at each
+            # profanity range. The instrumental is the second ffmpeg input ([1:a]);
+            # asplitting [0:a] here would splice the original audio back into itself
+            # and leave the profanity audible.
             for start, end in self.instrumentalSegments:
-                # Add original audio segment before profanity
+                # Original audio before the profanity
                 if start > last_end:
                     filter_parts.append(
-                        f"[orig]atrim={last_end:.2f}:{start:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
+                        f"[0:a]atrim={last_end:.2f}:{start:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
                     )
                     seg_index += 1
 
-                # Add instrumental audio segment for profanity
+                # Instrumental audio covering the profanity range
                 filter_parts.append(
-                    f"[inst]atrim={start:.2f}:{end:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
+                    f"[1:a]atrim={start:.2f}:{end:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
                 )
                 seg_index += 1
 
                 last_end = end
 
-            # Add final original audio segment after last profanity
-            filter_parts.append(
-                f"[orig]atrim={last_end:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
-            )
-            seg_index += 1
+            # Final original audio segment after the last profanity. Keep the trim
+            # open-ended when the duration is unknown, so no audio is dropped.
+            if last_end < duration or duration <= 0:
+                filter_parts.append(
+                    f"[0:a]atrim={last_end:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
+                )
+                seg_index += 1
 
             # Concatenate all segments
             concat_input = ''.join([f'[seg{i}]' for i in range(seg_index)])
