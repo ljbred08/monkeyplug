@@ -68,13 +68,15 @@ All classes live in `src/monkeyplug/monkeyplug.py`. The base `Plugger` class han
 
 2. **Profanity detection**: `naughtyWordList` = words where `scrub=True`, checked against `swearsMap` loaded from built-in JSON + optional custom file
 
-3. **Segment creation**: Three modes determined by `CreateCleanMuteList()`:
+3. **Segment creation**: Four modes determined by `CreateCleanMuteList()`:
    
    - **Mute/Beep**: `_create_mute_beep_list()` builds FFmpeg volume/filter chains
    
    - **Traditional instrumental**: User provides a full instrumental file (second ffmpeg input, `[1:a]`); `_build_instrumental_filters()` trims `[0:a]` around each profanity range and drops the `[1:a]` range in its place
    
    - **Auto-separation**: `_create_combined_profanity_file()` extracts profanity segments with padding into one combined WAV, runs through sherpa-onnx `SourceSeparator`, then `_build_instrumental_filters()` splices the AI-generated instrumental back in
+
+   - **Reverse mode** (`--reverse`, auto-separation only): the same extraction, but `_build_instrumental_filters()` also trims the vocal stem (`[2:a]`), reverses it with `areverse` and mixes it with the instrumental (`amix=inputs=2:normalize=0`) before the splice, so the profanity is audible but unintelligible
 
 ### Module Responsibilities
 
@@ -94,6 +96,25 @@ When `--instrumental auto` or `--instrumental generate` is used:
 3. `segMapping` tracks timestamp translation: `(profanity_start, profanity_end, combined_start, combined_end, padded_start, padded_end)`
 4. Combined file is separated by sherpa-onnx into vocals + instrumental
 5. `_build_instrumental_filters()` uses `segMapping` to extract the correct instrumental portions and splice them in
+6. With `--reverse` the vocal stem is kept in `self.vocalsFileSpec` and mixed back in, reversed, over each window
+
+### Reverse Mode (--reverse)
+
+Plays the censored words backwards under the instrumental instead of removing the vocal entirely.
+
+**Constraints:**
+
+- Requires AI generation (both Spleeter stems), so `--reverse` forces `auto_generate` and clears any instrumental file/prefix search
+- Ignored with `--mute`/`--beep` (they take priority) and outside Groq mode; both cases print a warning
+- Granularity is a whole merged profanity window: the vocal inside that window is reversed as one block, not word by word
+
+**Implementation:**
+
+- `_create_combined_profanity_file()` stores the separated vocal stem in `self.vocalsFileSpec`
+- `_build_instrumental_filters()` emits `[1:a]atrim=...[instN]`, `[2:a]atrim=...,areverse[voxN]` and `[instN][voxN]amix=inputs=2:normalize=0[segN]`
+- `EncodeCleanAudio()` adds the vocal stem as a third ffmpeg input (`-i`) so `[2:a]` resolves
+- `reverseMode` is a `Plugger` attribute (default `False`), settable with `--reverse` or the `reverse_mode` config key
+- `areverse` buffers each window in memory; fine at profanity-segment length, and the mixing is unnormalised so the stems keep their levels
 
 ### Config System
 
@@ -293,12 +314,13 @@ Uses timing data from `~/.cache/monkeyplug/timing_log.json` for smooth estimatio
 
 - **Traditional instrumental**: `[0:a]` for the song and `[1:a]` for the supplied instrumental, `atrim` each range then `concat` (never `asplit` `[0:a]` - that splices the original back into itself)
 - **Auto-separation**: `[0:a]` for original, `[1:a]` for combined instrumental, `atrim` + `concat`
+- **Reverse mode**: `[1:a]` instrumental stem + `[2:a]` vocal stem through `areverse`, joined with `amix=inputs=2:normalize=0`, then `atrim` + `concat`
 - **Mute**: `afade` volume filters with `enable='between(t,start,end)'`, 5ms fade edges
 - **Beep**: `volume=0` mute + `sine` generator + `amix`
 
 ### CLI Entry Point
 
-`monkeyplug = "monkeyplug:RunMonkeyPlug"` in pyproject.toml. `RunMonkeyPlug()` handles all argument parsing and mode routing. Mode priority: `--mute` > `--beep` > `--instrumental`.
+`monkeyplug = "monkeyplug:RunMonkeyPlug"` in pyproject.toml. `RunMonkeyPlug()` handles all argument parsing and mode routing. Mode priority: `--mute` > `--beep` > `--reverse` (forces AI generation) > `--instrumental`.
 
 ### Wildcard/Batch Mode
 

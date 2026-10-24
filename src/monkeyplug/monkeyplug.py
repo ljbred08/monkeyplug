@@ -1454,6 +1454,9 @@ class Plugger(object):
     instrumentalMode = False
     # Shared across files; reset at the start of RunMonkeyPlug.
     _metadataWarningShown = False
+    # reverse mode: AI generation only, mixes the reversed vocal stem back in
+    reverseMode = False
+    vocalsFileSpec = ""
     instrumentalSegments = []  # List of (start, end) tuples for profanity sections
 
     ######## init #################################################################
@@ -1483,6 +1486,7 @@ class Plugger(object):
         force=False,
         dbug=False,
         instrumentalFileSpec=None,
+        reverseMode=False,
         showWords="clean",
         detectMode="list",
         groqApiKey=None,
@@ -1509,6 +1513,8 @@ class Plugger(object):
         self.aiDetectModel = aiDetectModel
         self.aiDetectPrompt = aiDetectPrompt
         self.disableMetadata = disableMetadata
+        self.reverseMode = reverseMode
+        self.vocalsFileSpec = ""
         self.shazamMetadata = {}
 
         # determine input file name, or download and save file
@@ -1684,6 +1690,7 @@ class Plugger(object):
             mmguero.eprint(f'Instrumental mode: {self.instrumentalMode}')
             if self.instrumentalMode:
                 mmguero.eprint(f'Instrumental file: {self.instrumentalFileSpec}')
+            mmguero.eprint(f'Reverse mode: {self.reverseMode}')
 
         # Fetch metadata from Shazam if enabled
         self.shazamMetadata = self._fetch_shazam_metadata()
@@ -2484,9 +2491,25 @@ class Plugger(object):
                 position_in_combined = combined_start + (profanity_start - padded_start)
                 profanity_duration = profanity_end - profanity_start
 
-                filter_parts.append(
-                    f"[1:a]atrim={position_in_combined:.2f}:{position_in_combined + profanity_duration:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
-                )
+                profanity_end_in_combined = position_in_combined + profanity_duration
+
+                if self.reverseMode and self.vocalsFileSpec:
+                    # REVERSE MODE: drop the instrumental and the vocal stem, the
+                    # latter reversed, into the censored window so the word stays
+                    # audible but unintelligible
+                    filter_parts.append(
+                        f"[1:a]atrim={position_in_combined:.2f}:{profanity_end_in_combined:.2f},asetpts=PTS-STARTPTS[inst{seg_index}]"
+                    )
+                    filter_parts.append(
+                        f"[2:a]atrim={position_in_combined:.2f}:{profanity_end_in_combined:.2f},asetpts=PTS-STARTPTS,areverse[vox{seg_index}]"
+                    )
+                    filter_parts.append(
+                        f"[inst{seg_index}][vox{seg_index}]amix=inputs=2:normalize=0[seg{seg_index}]"
+                    )
+                else:
+                    filter_parts.append(
+                        f"[1:a]atrim={position_in_combined:.2f}:{profanity_end_in_combined:.2f},asetpts=PTS-STARTPTS[seg{seg_index}]"
+                    )
                 seg_index += 1
 
                 last_end = orig_end
@@ -2543,6 +2566,8 @@ class Plugger(object):
             else:
                 # Concise mode: just show segment count
                 mode = "auto-separation" if (hasattr(self, 'autoGenerateMode') and self.autoGenerateMode) else "traditional"
+                if self.reverseMode and self.vocalsFileSpec:
+                    mode += " + reversed vocals"
                 mmguero.eprint(f'Building FFmpeg filter with {len(self.instrumentalSegments)} instrumental segment(s) ({mode} mode)')
 
         return ['-filter_complex', filter_complex, '-map', '[outa]']
@@ -2750,6 +2775,9 @@ class Plugger(object):
                 # Add instrumental file input if in instrumental mode
                 if self.instrumentalMode:
                     ffmpegCmd.extend(['-i', self.instrumentalFileSpec])
+                    # reverse mode also needs the vocal stem ([2:a])
+                    if self.reverseMode and self.vocalsFileSpec:
+                        ffmpegCmd.extend(['-i', self.vocalsFileSpec])
 
                 ffmpegCmd.extend([
                     '-c:v',
@@ -2777,6 +2805,9 @@ class Plugger(object):
                 # Add instrumental file input if in instrumental mode
                 if self.instrumentalMode:
                     ffmpegCmd.extend(['-i', self.instrumentalFileSpec])
+                    # reverse mode also needs the vocal stem ([2:a])
+                    if self.reverseMode and self.vocalsFileSpec:
+                        ffmpegCmd.extend(['-i', self.vocalsFileSpec])
 
                 ffmpegCmd.extend(['-vn', '-sn', '-dn'])
                 ffmpegCmd.extend(audioArgs)
@@ -3220,6 +3251,7 @@ class GroqPlugger(Plugger):
         verbose_level="",
         auto_generate=False,
         separation_padding=1.0,
+        reverseMode=False,
         showWords="clean",
         detectMode="list",
         groqApiKey=None,
@@ -3269,6 +3301,7 @@ class GroqPlugger(Plugger):
             force=force,
             dbug=dbug,
             instrumentalFileSpec=instrumentalFileSpec,
+            reverseMode=reverseMode,
             showWords=showWords,
             detectMode=detectMode,
             groqApiKey=groqApiKey,
@@ -3639,6 +3672,12 @@ class GroqPlugger(Plugger):
             self.separationCacheDir
         )
 
+        # Keep the vocal stem around: reverse mode mixes it back in, reversed,
+        # over each censored window.
+        self.vocalsFileSpec = vocals_path
+        if self.debug and self.reverseMode:
+            mmguero.eprint(f'Vocals stem for reverse mode: {self.vocalsFileSpec}')
+
         return instrumental_path
 
 
@@ -3823,6 +3862,7 @@ DEFAULT_CONFIG = {
     "pad_milliseconds_pre": 10,
     "pad_milliseconds_post": 10,
     "separation_padding": 1.0,
+    "reverse_mode": False,
     "beep_hertz": BEEP_HERTZ_DEFAULT,
     "show_words": "clean",
     "detect_mode": "list",
@@ -4210,6 +4250,13 @@ def RunMonkeyPlug():
         default=config.get("separation_padding", 1.0),
         metavar="<seconds>",
         help=f"Context padding for AI generation (default: {config.get('separation_padding', 1.0)} seconds)",
+    )
+    parser.add_argument(
+        "--reverse",
+        dest="reverseMode",
+        action="store_true",
+        default=config.get("reverse_mode", False),
+        help="Reverse mode: in AI generation mode, drop the instrumental plus the reversed vocal stem into each censored window (implies --instrumental generate)",
     )
     parser.add_argument(
         "--filter-instrumentals",
@@ -4648,6 +4695,15 @@ def RunMonkeyPlug():
         args.instrumentalFile = None
         auto_generate = False
 
+    # Reverse mode needs the separated vocal stem, so it forces AI generation
+    elif args.reverseMode:
+        auto_generate = True
+        skip_detection = True
+        args.instrumentalFile = None
+        args.instrumentalPrefix = None
+        if args.debug:
+            mmguero.eprint('Reverse mode: forcing AI generation (instrumental + reversed vocals)')
+
     # Process instrumental mode arguments
     # Default to auto mode if no instrumental flag provided or instrumentalPrefix is default "AUTO"
     elif args.instrumentalFile is None and (args.instrumentalPrefix is None or args.instrumentalPrefix == "AUTO"):
@@ -4693,6 +4749,13 @@ def RunMonkeyPlug():
             # Treat as filename - already set in args.instrumentalFile
             if args.debug:
                 mmguero.eprint(f'Using specified instrumental file: {args.instrumentalFile}')
+
+    # --reverse needs the separated vocal stem, which only AI generation provides
+    if args.reverseMode:
+        if args.mute or args.beep:
+            mmguero.eprint('Warning: --reverse is ignored with --mute/--beep')
+        elif args.speechRecMode != SPEECH_REC_MODE_GROQ:
+            mmguero.eprint('Warning: --reverse requires AI generation, which is only available in Groq mode; ignoring --reverse')
 
     # --filter-instrumentals overrides generate mode's skip_detection
     if args.filterInstrumentals:
@@ -4875,6 +4938,7 @@ def RunMonkeyPlug():
                 verbose_level=args_copy.verbose_level if hasattr(args_copy, 'verbose_level') else "",
                 auto_generate=file_auto_generate,
                 separation_padding=args_copy.separationPadding,
+                reverseMode=getattr(args_copy, 'reverseMode', False),
                 showWords=args_copy.showWords,
                 detectMode=args_copy.detectMode,
                 groqApiKey=args_copy.groqApiKey,
@@ -5187,6 +5251,7 @@ def RunMonkeyPlug():
             verbose_level=args.verbose_level if hasattr(args, 'verbose_level') else "",
             auto_generate=auto_generate,
             separation_padding=args.separationPadding,
+            reverseMode=args.reverseMode,
             showWords=args.showWords,
             detectMode=args.detectMode,
             groqApiKey=args.groqApiKey,

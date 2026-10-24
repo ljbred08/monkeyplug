@@ -10,6 +10,7 @@ The CLI command is still `monkeyplug` — only the package name changed to avoid
 
 - **Groq API** integration (fast, default mode)
 - **AI instrumental generation** via sherpa-onnx source separation
+- **Reverse mode** (`--reverse`) — instrumental plus the reversed vocal over each censored word
 - **AI profanity detection** via Groq LLM with structured outputs
 - **Wildcard/batch processing** with automatic vocal detection
 - **Progress bar** for non-verbose mode
@@ -157,6 +158,18 @@ The AI separation process:
 4. Splices the AI-generated instrumental back into the original
 
 Separation models are cached at `~/.cache/monkeyplug/separation_models/` (downloaded on first use).
+
+#### Reverse mode
+
+The classic "play the word backwards" trick: instead of only the instrumental, each profanity window gets the instrumental *plus the reversed vocal*, so the word stays audible but can't be made out.
+
+```bash
+monkeyplug -i song.mp3 -o song_clean.mp3 --reverse
+```
+
+Reverse mode needs both stems from AI separation, so `--reverse` implies `--instrumental generate` and skips instrumental file searching (a supplied instrumental has no vocal stem to reverse). It is ignored with `--mute`/`--beep`, which take priority, and requires the Groq speech engine.
+
+The reversed vocal is mixed at its original level (`amix=inputs=2:normalize=0`), so the instrumental and vocal stems still add up to the level of the untouched song.
 
 ## Wildcard / Batch Mode
 
@@ -349,6 +362,7 @@ If neither exists, a default config is auto-created at `~/.cache/monkeyplug/conf
   "pad_milliseconds_pre": 10,
   "pad_milliseconds_post": 10,
   "separation_padding": 1.0,
+  "reverse_mode": false,
   "beep_hertz": 1000,
   "show_words": "clean",
   "detect_mode": "list",
@@ -394,6 +408,7 @@ Censorship Modes:
   --instrumental <mode|file>        Instrumental mode: auto, generate, prefix, or file path
   --instrumental-prefix <string>    Prefix to search for instrumental file (default: AUTO)
   --instrumental-auto-candidates <int>  Top candidates for AUTO matching (default: 5)
+  --reverse                         Instrumental + reversed vocals in each censored window (implies AI generation)
 
 Profanity:
   --swears <file>                   Custom profanity list (text or JSON)
